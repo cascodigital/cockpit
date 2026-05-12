@@ -1,0 +1,30 @@
+# Secrets
+.env
+*.env.local
+
+# Data (chats, indexes, audits — all user-generated)
+data/
+app/data/
+*.bak
+*.bak-*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.venv/
+venv/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Logs
+*.log
