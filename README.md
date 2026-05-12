@@ -1,168 +1,190 @@
-# Cockpit
+# Cockpit — Forensic UI for AI Chat Sessions
 
-A self-hosted forensic UI for your AI chat sessions. Indexes [Claude
-Code](https://docs.claude.com/en/docs/claude-code), [Codex
-CLI](https://github.com/openai/codex), and [Gemini
-CLI](https://github.com/google-gemini/gemini-cli) logs across all your machines
-into one searchable, audited dashboard.
+![Status](https://img.shields.io/badge/Status-Active-brightgreen)
+![License](https://img.shields.io/badge/License-MIT-blue)
+![Author](https://img.shields.io/badge/Author-Casco%20Digital-orange)
 
-If you keep losing the conversation where you actually figured out the answer:
-this is for you.
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&logo=docker&logoColor=white)
+![DeepSeek](https://img.shields.io/badge/DeepSeek-API-4D6BFE?style=flat-square)
+![Gemini](https://img.shields.io/badge/Gemini-Embeddings-8E75B2?style=flat-square&logo=googlegemini&logoColor=white)
+
+Self-hosted forensic UI that indexes [Claude Code](https://docs.claude.com/en/docs/claude-code), [Codex CLI](https://github.com/openai/codex), and [Gemini CLI](https://github.com/google-gemini/gemini-cli) sessions across every machine you use. Hybrid search (BM25 + embeddings), daily LLM-generated audits with behavioral patterns, and a memory profile distilled from recurring themes — all in one dashboard you control.
+
+![Sidebar](docs/screenshots/01-sidebar-chat.png)
 
 ## Why
 
-CLI assistants scatter `.jsonl` files across `~/.claude/`, `~/.codex/`,
-`~/.gemini/` on every machine you use. There's no global search, no recall, no
-"what did I work on last Thursday" view. Cockpit fixes that by:
+CLI assistants scatter `.jsonl` files across `~/.claude/`, `~/.codex/`, `~/.gemini/` on every machine. There's no global search, no recall, no "what did I work on last Thursday" view. Cockpit fixes that.
 
-- **Centralizing** all sessions on one server you control.
-- **Indexing** them with BM25 + (optional) Gemini embeddings for hybrid search.
-- **Auditing** the day's work via LLM into a structured JSON dashboard —
-  headline, narrative, behavioral patterns, focus score, category heatmap.
-- **Distilling** a memory profile from recurring themes across sessions.
+## Features
 
-The auditor's voice is intentionally sarcastic (it plays a fictional Elder AI
-called Skippy). Swap the prompt if that's not your thing — it's in
-`app/daily_auditor.py`.
+| Feature | Description |
+|---------|-------------|
+| **Hybrid Search** | BM25 keyword + optional Gemini embeddings, fused via Reciprocal Rank Fusion |
+| **Daily Audit** | LLM-generated structured JSON: headline, narrative, behavioral patterns, focus score |
+| **Weekly Digest** | Cross-cutting analysis over the last 7 daily audits |
+| **Memory Profile** | Long-term distillation of recurring themes, blockers, and open threads |
+| **Category Heatmap** | Visual breakdown of session topics across the last 14 days |
+| **Per-source Badges** | Color-coded sessions by AI (Claude/Gemini/Codex) and host (WIN/LNX/DKR) |
+| **Skippy Voice** | Sarcastic Elder AI persona for the auditor — swappable in the prompt |
 
 ## Screenshots
 
-> *(Drop screenshots into `docs/screenshots/` and link them here.)*
+| Daily Audit Dashboard | Semantic Search |
+|:---:|:---:|
+| ![Daily Audit](docs/screenshots/02-daily-audit.png) | ![Search](docs/screenshots/03-semantic-search.png) |
 
-## Try it without real data
-
-Want to see what the UI looks like before you set up syncing? Seed it with
-30 fictional sessions plus a fake 12-day audit history:
-
-```bash
-python scripts/demo/seed-data.py
-docker compose up -d
-```
-
-Then open `http://localhost:8000`. Everything in the UI is fake but
-realistic — useful for screenshots, demos, or testing customizations.
+| Memory Profile | |
+|:---:|:---:|
+| ![Memory](docs/screenshots/04-memory-profile.png) | |
 
 ## Architecture
 
 ```
 [ client machines ]               [ cockpit server ]
-                                  ┌─────────────────────┐
-~/.claude/projects/  ──────────►  │ data/claude/        │
-~/.codex/sessions/   ── cron ─►   │ data/codex/         │  ─► cockpit.py (Python)
-~/.gemini/tmp/...    ──────────►  │ data/gemini/        │     │
-                                  │                     │     ├─ index worker (BM25)
-                                  │ data/daily_audit.   │ ◄───┤  every 150s
-                                  │ json, search_index, │     │
-                                  │ memory_profile.json │     ├─ /api/search
-                                  └─────────────────────┘     ├─ /api/memory/*
-                                                              └─ web UI (port 8000)
+                                  +---------------------+
+~/.claude/projects/  ----rsync-->  | data/claude/        |
+~/.codex/sessions/   ----cron --->  | data/codex/         |  --> cockpit.py
+~/.gemini/tmp/...    ----rsync-->  | data/gemini/        |        |
+                                  |                     |        +-- index worker (BM25)
+                                  | daily_audit.json    | <------+   every 150s
+                                  | search_index.json   |        |
+                                  | memory_profile.json |        +-- /api/search
+                                  +---------------------+        +-- /api/memory/*
+                                                                 +-- web UI :8000
 ```
 
-Sync is push-based: each client cron-rsyncs its session directory to the
-server. The server-side container only reads — it never SSHes back out.
+Sync is push-based: each client cron-rsyncs its session directory to the server. The server only reads — it never SSHes back out.
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the long version.
+## Structure
 
-## Quick start
+```
+cockpit/
+├── app/
+│   ├── cockpit.py              # HTTP server + index worker + UI
+│   ├── daily_auditor.py        # Daily LLM audit pipeline
+│   ├── weekly_digest.py        # 7-day pattern analysis
+│   └── memory_distiller.py     # Long-term profile builder
+├── scripts/
+│   ├── sync/                   # rsync scripts for each client
+│   │   ├── claude_sync.sh
+│   │   ├── codex_sync.sh
+│   │   └── gemini_sync.sh
+│   └── demo/
+│       └── seed-data.py        # Generates fake data for demos/screenshots
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── CONFIGURATION.md
+│   └── screenshots/
+├── docker-compose.yml
+├── Dockerfile
+└── requirements.txt
+```
+
+## Quick Start
 
 ### 1. Run the server
 
 ```bash
-git clone https://github.com/<you>/cockpit.git
+git clone <repo-url> cockpit
 cd cockpit
 cp .env.example .env
-# Edit .env — at minimum, set DEEPSEEK_API_KEY *or* GEMINI_API_KEY.
+# Edit .env — set at least one of DEEPSEEK_API_KEY or GEMINI_API_KEY
 docker compose up -d
 ```
 
-Open `http://<your-server>:8000`. You'll see an empty UI until sessions
-arrive.
+Open `http://localhost:8000`. UI will be empty until sessions arrive.
 
-### 2. Sync sessions from each client
-
-On every machine where you use Claude / Codex / Gemini CLIs:
+### 2. Try it with fake data
 
 ```bash
-git clone https://github.com/<you>/cockpit.git
-cd cockpit/scripts/sync
+python scripts/demo/seed-data.py
+docker compose restart cockpit
+```
+
+30 fictional sessions + 12-day audit history populate the UI. Useful for screenshots, demos, or evaluating before wiring up real syncs.
+
+### 3. Sync from your machines
+
+On each machine where you use Claude / Codex / Gemini CLIs:
+
+```bash
+cd scripts/sync
 cp .env.example .env
 # Edit .env — set COCKPIT_HOST / COCKPIT_USER / CLIENT_NAME
-
-ssh-copy-id $COCKPIT_USER@$COCKPIT_HOST   # passwordless SSH
-
+ssh-copy-id $COCKPIT_USER@$COCKPIT_HOST
 crontab -e
-# Add the scripts you need (skip the ones you don't use):
+```
+
+Add the scripts you need (skip the ones you don't use):
+
+```cron
 */5 * * * * /path/to/cockpit/scripts/sync/claude_sync.sh
 */5 * * * * /path/to/cockpit/scripts/sync/codex_sync.sh
 */5 * * * * /path/to/cockpit/scripts/sync/gemini_sync.sh
 ```
 
-Sessions appear in the UI within ~3 minutes (cron interval + index loop).
+Sessions appear in the UI within ~3 minutes.
 
 ## Configuration
 
-All config is env-driven. See [`.env.example`](.env.example) for the full list.
-TL;DR:
+All config via env vars. See [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) for the full reference.
 
-| Variable | Default | What it does |
-|---|---|---|
-| `PORT` | `8000` | HTTP port for the UI/API |
-| `DEEPSEEK_API_KEY` | — | LLM provider for daily/weekly audits (primary) |
-| `GEMINI_API_KEY` | — | LLM provider (fallback) + embeddings for semantic search |
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `PORT` | `8000` | HTTP listen port |
+| `DEEPSEEK_API_KEY` | — | Primary LLM for audits (cheap, JSON-mode reliable) |
+| `GEMINI_API_KEY` | — | Fallback LLM + embeddings for semantic search |
 | `TZ` | `UTC` | Affects daily audit date boundaries |
-| `MEMORY_KEYWORDS` | (empty) | Comma-separated keywords to filter chats for the memory distiller. Empty = use all recent chats |
+| `MEMORY_KEYWORDS` | (empty) | Comma-separated filter for the memory distiller |
 
-You need at least one of `DEEPSEEK_API_KEY` / `GEMINI_API_KEY`. Without
-`GEMINI_API_KEY`, semantic search is disabled but BM25 keyword search still
-works.
-
-See [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) for the long version,
-including custom skill taxonomies and category vocabularies.
+At least one of `DEEPSEEK_API_KEY` / `GEMINI_API_KEY` is required. Without `GEMINI_API_KEY`, semantic search degrades to BM25-only — still very usable.
 
 ## API
 
-- `GET /` — Web UI
-- `GET /api/chats` — All indexed sessions (metadata)
-- `GET /api/chat/<uid>` — Full messages of one session
-- `POST /api/search` — Hybrid BM25 + semantic search. Body: `{"query": "..."}`
-- `GET /api/search/status` — Index health
-- `GET /api/memory/daily` — Rolling 14-day audit history
-- `GET /api/memory/weekly` — On-demand weekly digest (regenerates per call)
-- `GET /api/memory/profile` — Long-term memory distilled by `memory_distiller.py`
-- `POST /api/skill_log` — Tag the next session with a skill/agent
-  (`{"skill":"coding","agent":"claude","ts":"<iso>"}`)
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Web UI |
+| `/api/chats` | GET | All indexed sessions (metadata) |
+| `/api/chat/<uid>` | GET | Full messages of one session |
+| `/api/search` | POST | Hybrid BM25 + semantic search. Body: `{"query": "..."}` |
+| `/api/search/status` | GET | Index health |
+| `/api/memory/daily` | GET | Rolling 14-day audit history |
+| `/api/memory/weekly` | GET | On-demand weekly digest (regenerates per call) |
+| `/api/memory/profile` | GET | Long-term distilled memory |
+| `/api/skill_log` | POST | Tag the next session with a skill |
 
-## Customizing the persona
+## Stack
 
-The daily/weekly auditors and the memory distiller share a deliberately
-sarcastic persona ("Skippy the Magnificent" — a reference to *Expeditionary
-Force*). Some users find this energizing; some find it grating. To switch:
+- **Python 3.11** stdlib HTTP server (no Flask/FastAPI dependency)
+- **rank-bm25** + **numpy** for keyword search
+- **Google Gemini** embeddings (optional) for semantic search
+- **DeepSeek** (primary) + **Gemini** (fallback) for daily audits and memory distillation
+- **Docker Compose** deployment
+- **Bash + rsync** for client-side syncing (no agent on clients)
 
-1. Open `app/daily_auditor.py` (or `weekly_digest.py` / `memory_distiller.py`).
-2. Find the `prompt_text = (...)` block.
-3. Replace the TONE RULES section with whatever voice you want. Keep the JSON
-   FORMAT section intact — that's what the UI parses.
+## Customizing the Persona
 
-## Limitations and trade-offs
+The auditor and distillers share a sarcastic Elder AI persona ("Skippy" — a nod to the *Expeditionary Force* series). To change the voice:
 
-- **No auth.** The UI is wide-open on whatever port you bind. Put it behind a
-  reverse proxy + basic auth if it's not on a private LAN.
-- **One user.** No multi-tenant separation. Sessions from all clients land in
-  the same index.
-- **LLM cost.** One daily audit + one weekly digest per day, plus
-  ~1 embedding per new chat. With DeepSeek as primary this stays well under
-  $1/month for typical use.
-- **Codex JSONL parser is best-effort.** Codex's log format has changed
-  occasionally; if a new format ships, the parser in `app/cockpit.py`
-  (`convert_codex_log`) may need an update.
+1. Open `app/daily_auditor.py` (or `weekly_digest.py` / `memory_distiller.py`)
+2. Find the `prompt_text = (...)` block
+3. Replace the TONE RULES section. Keep the JSON FORMAT block intact — the UI parses it.
 
-## Contributing
+A neutral replacement is suggested in [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 
-Issues and PRs welcome. Anything that makes the indexer more robust,
-generalizes the parsers, or adds a new chat source (other CLIs, Cursor, etc.)
-is in scope. UI rewrites are out of scope unless they keep the single-file
-Python deployability.
+## Limitations
+
+- **No auth.** UI is open on whatever port you bind. Put behind a reverse proxy + basic auth if exposed beyond LAN.
+- **Single tenant.** Sessions from all clients land in the same index.
+- **LLM cost.** ~1 audit + ~1 weekly digest + ~1 embedding per new chat per day. With DeepSeek as primary, stays well under USD $1/month for typical use.
+- **Codex parser is best-effort.** Codex JSONL format has shifted occasionally; the parser may need updates if the format changes.
 
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
+
+---
+
+Built by **Casco Digital**.
