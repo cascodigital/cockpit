@@ -29,6 +29,19 @@ called Skippy). Swap the prompt if that's not your thing — it's in
 
 > *(Drop screenshots into `docs/screenshots/` and link them here.)*
 
+## Try it without real data
+
+Want to see what the UI looks like before you set up syncing? Seed it with
+30 fictional sessions plus a fake 12-day audit history:
+
+```bash
+python scripts/demo/seed-data.py
+docker compose up -d
+```
+
+Then open `http://localhost:8000`. Everything in the UI is fake but
+realistic — useful for screenshots, demos, or testing customizations.
+
 ## Architecture
 
 ```
