@@ -1,0 +1,22 @@
+services:
+  cockpit:
+    build: .
+    container_name: cockpit
+    working_dir: /app
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      - ./app:/app
+      - ./data:/app/data
+    environment:
+      PORT: 8000
+      TZ: ${TZ:-UTC}
+      GEMINI_DATA: /app/data/gemini
+      CLAUDE_DATA: /app/data/claude
+      CLAUDE_CONVERTED: /app/data/claude_converted
+      CODEX_DATA: /app/data/codex
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      PYTHONUNBUFFERED: "1"
+    command: python cockpit.py
+    restart: unless-stopped
