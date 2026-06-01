@@ -1,11 +1,3 @@
-"""
-Cockpit — Forensic UI for AI chat sessions.
-
-Indexes Claude Code, Gemini CLI, and Codex CLI sessions; provides search
-(BM25 + optional Gemini embeddings), per-day audits, and a memory distiller.
-
-Configuration is environment-driven — see .env.example.
-"""
 import os
 import json
 import glob
@@ -18,7 +10,7 @@ import time
 import subprocess
 import sys
 
-# Auto-install runtime deps (kept for zero-friction `docker run` without a build).
+# AUTO-INSTALL DEPENDENCIES
 try:
     import requests
 except ImportError:
@@ -33,31 +25,44 @@ except ImportError:
     from rank_bm25 import BM25Okapi
     import numpy as np
 
-import memory_distiller
+import ludovico_distiller
 import daily_auditor
 
-# ─── CONFIGURATION ───────────────────────────────────────────────────────────
+# CONFIGURAÇÃO
 PORT = int(os.environ.get('PORT', 8000))
 GEMINI_BASE_DIR = os.environ.get('GEMINI_DATA', '/app/data/gemini')
 CLAUDE_PROJECTS_DIR = os.environ.get('CLAUDE_DATA', '/app/data/claude')
 CLAUDE_CONVERTED_DIR = os.environ.get('CLAUDE_CONVERTED', '/app/data/claude_converted')
 CODEX_BASE_DIR = os.environ.get('CODEX_DATA', '/app/data/codex')
+CHATGPT_SITE_DIR = os.environ.get('CHATGPT_SITE_DATA', '/app/data/chatgpt_site')
 DATA_DIR = '/app/data'
-APP_VERSION = '1.0'
+APP_VERSION = '6.2'
 SKILL_LOG_PATH = os.path.join(DATA_DIR, 'skill_log.jsonl')
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
-EMBED_DISABLED = False  # set True on first persistent API failure
-EMBED_RUNNING = False
+EMBED_DISABLED = False  # set True on first API failure
+EMBED_RUNNING = False  # prevent concurrent embed threads
 SEARCH_INDEX_PATH = os.path.join(DATA_DIR, 'search_index.json')
 
-# Example skill taxonomy. Replace freely — these are only used to colorize
-# sessions in the UI when /api/skill_log receives entries tagging a session.
-# Keys are lowercase slugs; values define the icon (emoji) and display label.
 SKILLS_MAP = {
-    'coding':   {'icon': '💻', 'name': 'Coding'},
-    'writing':  {'icon': '✍️', 'name': 'Writing'},
-    'research': {'icon': '🔬', 'name': 'Research'},
-    'planning': {'icon': '🗺️', 'name': 'Planning'},
+    'skippy':      {'icon': '🍺', 'name': 'Skippy'},
+    'skacoes':     {'icon': '📈', 'name': 'Trading'},
+    'skadv':       {'icon': '⚖️', 'name': 'Advogado'},
+    'skcnpj':      {'icon': '🤝', 'name': 'Saul'},
+    'skcpf':       {'icon': '🧅', 'name': 'Architect'},
+    'skcreator':   {'icon': '🏗️', 'name': 'Creator'},
+    'skeng':       {'icon': '🇬🇧', 'name': 'English'},
+    'skhumanizer': {'icon': '✍️', 'name': 'Humanizer'},
+    'skmcp':       {'icon': '🔌', 'name': 'MCP'},
+    'skmed':       {'icon': '💊', 'name': 'Hans'},
+    'skmimi':      {'icon': '🐢', 'name': 'Mimi'},
+    'skprompt':    {'icon': '✨', 'name': 'Prompt'},
+    'skpsi':       {'icon': '🧬', 'name': 'Skippy Psi'},
+    'skrelatorio': {'icon': '📊', 'name': 'Relatorio'},
+    'skresume':    {'icon': '🧾', 'name': 'Resume'},
+    'skrolo':      {'icon': '🎵', 'name': 'Rolo'},
+    'sksup':       {'icon': '🎫', 'name': 'Suporte'},
+    'skvet':       {'icon': '🐱', 'name': 'Chico'},
 }
 
 CHAT_INDEX = []
@@ -67,8 +72,6 @@ BM25_INDEX = None
 BM25_UIDS = []
 EMBED_INDEX = {}
 SEARCH_LOCK = threading.Lock()
-
-# ─── SKILL LOG (optional, populated via POST /api/skill_log) ─────────────────
 
 def load_skill_log():
     global SKILL_LOG
@@ -86,7 +89,6 @@ def load_skill_log():
     SKILL_LOG = entries
 
 def match_skill(session_start_ts, agent):
-    """Find a skill log entry whose timestamp is within 5 minutes of a session start."""
     if not SKILL_LOG or not session_start_ts:
         return None
     try:
@@ -123,18 +125,14 @@ def match_skill(session_start_ts, agent):
 
     return best_match
 
-# ─── CHAT PARSING ────────────────────────────────────────────────────────────
-
 def clean_content(content):
     if not content: return ''
     if isinstance(content, list):
         text_parts = []
         for p in content:
             if isinstance(p, dict):
-                if p.get('type') == 'text' or ('text' in p and 'type' not in p):
-                    text_parts.append(p.get('text', ''))
-            else:
-                text_parts.append(str(p))
+                if p.get('type') == 'text' or ('text' in p and 'type' not in p): text_parts.append(p.get('text', ''))
+            else: text_parts.append(str(p))
         content = ' '.join(text_parts)
     content = re.sub(r'--- Content from.*?--- End of content ---', '', content, flags=re.DOTALL)
     content = re.sub(r'<local-command-caveat>.*?</local-command-caveat>', '', content, flags=re.DOTALL)
@@ -144,18 +142,18 @@ def format_date(val):
     try:
         if isinstance(val, str) and 'T' in val:
             dt = datetime.fromisoformat(val.replace('Z', '+00:00')).astimezone()
-            return dt.strftime('%Y-%m-%d %H:%M:%S'), dt.timestamp()
+            return dt.strftime('%d/%m/%Y %H:%M:%S'), dt.timestamp()
         fval = float(val)
         if fval < 10000000000: fval *= 1000
         dt = datetime.fromtimestamp(fval/1000)
-        return dt.strftime('%Y-%m-%d %H:%M:%S'), dt.timestamp()
+        return dt.strftime('%d/%m/%Y %H:%M:%S'), dt.timestamp()
     except:
-        return "Unknown date", 0
+        return "Data Desconhecida", 0
 
 def convert_claude_log(jsonl_path):
-    """Parse a Claude Code .jsonl session log into a normalized message list."""
     messages = []
     start_ts = None
+    models = set()
     try:
         with open(jsonl_path, 'r', encoding='utf-8') as f:
             for line in f:
@@ -166,6 +164,9 @@ def convert_claude_log(jsonl_path):
                     if not role or role not in ['user', 'assistant']:
                         role = msg_obj.get('role')
                     if not role: continue
+                    model = entry.get('model') or msg_obj.get('model') or ''
+                    if role == 'assistant' and model:
+                        models.add(model)
                     content_raw = msg_obj.get('content')
                     ts = entry.get('timestamp')
                     if not start_ts: start_ts = ts
@@ -185,7 +186,10 @@ def convert_claude_log(jsonl_path):
     except: return None
     if not messages: return None
     session_id = os.path.basename(jsonl_path).replace('.jsonl', '')
-    return {'sessionId': session_id, 'startTime': start_ts or messages[0]['timestamp'], 'messages': messages}
+    result = {'sessionId': session_id, 'startTime': start_ts or messages[0]['timestamp'], 'messages': messages}
+    if models:
+        result['model'] = ', '.join(sorted(models))
+    return result
 
 def extract_codex_content(content):
     if not content:
@@ -206,7 +210,6 @@ def extract_codex_content(content):
     return str(content)
 
 def convert_codex_log(jsonl_path):
-    """Parse a Codex CLI .jsonl session log. Skips role:developer (SKILL.md injections)."""
     messages = []
     session_id = os.path.basename(jsonl_path).replace('.jsonl', '')
     start_ts = None
@@ -240,7 +243,10 @@ def convert_codex_log(jsonl_path):
                 content = clean_content(extract_codex_content(payload.get('content')))
                 if not content:
                     continue
-                if role == 'user' and content.startswith('<environment_context>'):
+                if role == 'user' and (
+                    content.startswith('<environment_context>')
+                    or content.startswith('Use o SKILL.md abaixo')
+                ):
                     continue
                 messages.append({
                     'type': 'codex' if role == 'assistant' else 'user',
@@ -256,7 +262,6 @@ def convert_codex_log(jsonl_path):
     return {'sessionId': session_id, 'startTime': start_ts or messages[0]['timestamp'], 'messages': messages}
 
 def sync_claude():
-    """Convert raw Claude .jsonl files into normalized .json in CLAUDE_CONVERTED_DIR."""
     if not os.path.exists(CLAUDE_PROJECTS_DIR): return
     if not os.path.exists(CLAUDE_CONVERTED_DIR): os.makedirs(CLAUDE_CONVERTED_DIR)
     for f in glob.glob(os.path.join(CLAUDE_PROJECTS_DIR, '**', '*.jsonl'), recursive=True):
@@ -273,8 +278,27 @@ def get_summary(messages, source):
         if m.get('type') != 'user': continue
         c = clean_content(m.get('content', ''))
         if len(c) > 5: return c[:100] + '...' if len(c) > 100 else c
-    labels = {'gemini': 'Gemini session', 'claude': 'Claude session', 'codex': 'Codex session'}
-    return labels.get(source, 'Session')
+    labels = {
+        'gemini': 'Sessao Gemini',
+        'claude': 'Sessao Claude',
+        'codex': 'Sessao Codex',
+        'deepseek': 'Sessao DeepSeek',
+        'chatgpt': 'Sessao ChatGPT',
+    }
+    return labels.get(source, 'Sessao')
+
+def compact_chat_item(uid, chat, skill, summary):
+    """Return sidebar/search metadata without the full message payload."""
+    return {
+        'uid': uid,
+        'sid': chat.get('sid', ''),
+        'machine': chat.get('machine', ''),
+        'source': chat.get('source', ''),
+        'date': chat.get('date', ''),
+        'raw_date': chat.get('raw_date', 0),
+        'skill': skill,
+        'summary': summary,
+    }
 
 # ─── SEARCH ENGINE ───────────────────────────────────────────────────────────
 
@@ -374,6 +398,7 @@ def update_embed_index():
         EMBED_RUNNING = False
 
 def _do_embed_index():
+    """Inner embedding logic."""
     global EMBED_DISABLED
     if not GEMINI_API_KEY or EMBED_DISABLED:
         return
@@ -418,11 +443,12 @@ def cosine_sim(a, b):
     return float(np.dot(a, b) / (norm_a * norm_b))
 
 def hybrid_search(query, top_k=30):
-    """Reciprocal Rank Fusion of BM25 + semantic embeddings."""
+    """RRF fusion of BM25 + semantic embeddings."""
     query_terms = tokenize(query)
     rrf_scores = {}
-    K = 60
+    K = 60  # RRF constant
 
+    # BM25 ranking
     if BM25_INDEX and BM25_UIDS:
         with SEARCH_LOCK:
             scores = BM25_INDEX.get_scores(query_terms)
@@ -432,6 +458,7 @@ def hybrid_search(query, top_k=30):
             if score > 0:
                 rrf_scores[uid] = rrf_scores.get(uid, 0) + 1.0 / (rank + K)
 
+    # Semantic ranking
     if GEMINI_API_KEY and EMBED_INDEX:
         q_embs = get_embeddings_batch([query])
         if q_embs:
@@ -454,6 +481,7 @@ def hybrid_search(query, top_k=30):
         snippet = get_snippet(text, query_terms)
         output.append({
             'uid': uid,
+            'sid': chat.get('sid', ''),
             'score': round(score, 6),
             'snippet': snippet,
             'date': chat.get('date', ''),
@@ -467,10 +495,10 @@ def hybrid_search(query, top_k=30):
 # ─── INDEX WORKER ────────────────────────────────────────────────────────────
 
 def index_worker():
-    """Background loop: re-scan data dirs every 150s, rebuild BM25 on change."""
     global CHAT_INDEX, CHAT_MESSAGES
     file_metadata = {}
     last_distill_date = None
+    last_ludovico_date = None
     while True:
         try:
             sync_claude()
@@ -493,21 +521,17 @@ def index_worker():
                                     content = clean_content(content)
                                     mc = msg.copy(); mc['type'] = role; mc['content'] = content
                                     proc.append(mc)
-                                sid = data.get("sessionId", fname.replace(".json", ""))
+                                sid = data.get("sessionId", fname.replace(".json",""))
                                 start_raw = data.get("startTime") or data.get("lastUpdated") or mtime
                                 date_str, raw_ts = format_date(start_raw)
-                                CHAT_MESSAGES[uid] = {
-                                    "msgs": proc, "sid": sid,
-                                    "machine": 'DKR' if 'docker' in f.lower() else ('LNX' if 'linux' in f.lower() else 'WIN'),
-                                    "source": "gemini", "date": date_str, "raw_date": raw_ts, "start_raw": start_raw
-                                }
+                                CHAT_MESSAGES[uid] = {"msgs": proc, "sid": sid, "machine": 'DKR' if 'docker' in f.lower() else ('LNX' if 'linux' in f.lower() else 'WIN'), "source": "gemini", "date": date_str, "raw_date": raw_ts, "start_raw": start_raw}
                                 file_metadata[uid] = mtime
                                 something_changed = True
                         except: continue
                     if uid in CHAT_MESSAGES:
                         m = CHAT_MESSAGES[uid]
                         skill = match_skill(m.get('start_raw'), 'gemini')
-                        current_chats[uid] = {**m, 'uid': uid, 'skill': skill, 'summary': get_summary(m['msgs'], 'gemini')}
+                        current_chats[uid] = compact_chat_item(uid, m, skill, get_summary(m['msgs'], 'gemini'))
 
             if os.path.isdir(CLAUDE_CONVERTED_DIR):
                 for f in glob.glob(os.path.join(CLAUDE_CONVERTED_DIR, '*.json')):
@@ -518,24 +542,23 @@ def index_worker():
                         try:
                             with open(f, 'r', encoding='utf-8') as j:
                                 data = json.load(j); raw = data.get('messages', []); proc = []
+                                model = data.get('model', '').lower()
+                                source = 'deepseek' if 'deepseek' in model else 'claude'
                                 for msg in raw:
                                     content = clean_content(msg.get('content', ''))
                                     mc = msg.copy(); mc['content'] = content
                                     proc.append(mc)
-                                sid = data.get("sessionId", "").replace("CLAUDE-", "")
+                                sid = data.get("sessionId", "").replace("CLAUDE-","")
                                 start_raw = data.get('startTime', mtime)
                                 date_str, raw_ts = format_date(start_raw)
-                                CHAT_MESSAGES[uid] = {
-                                    "msgs": proc, "sid": sid, "machine": data.get("machine", "WIN"),
-                                    "source": "claude", "date": date_str, "raw_date": raw_ts, "start_raw": start_raw
-                                }
+                                CHAT_MESSAGES[uid] = {"msgs": proc, "sid": sid, "machine": data.get("machine", "WIN"), "source": source, "date": date_str, "raw_date": raw_ts, "start_raw": start_raw}
                                 file_metadata[uid] = mtime
                                 something_changed = True
                         except: continue
                     if uid in CHAT_MESSAGES:
                         m = CHAT_MESSAGES[uid]
                         skill = match_skill(m.get('start_raw'), 'claude')
-                        current_chats[uid] = {**m, 'uid': uid, 'skill': skill, 'summary': get_summary(m['msgs'], 'claude')}
+                        current_chats[uid] = compact_chat_item(uid, m, skill, get_summary(m['msgs'], 'claude'))
 
             if os.path.isdir(CODEX_BASE_DIR):
                 for f in glob.glob(os.path.join(CODEX_BASE_DIR, '**', '*.jsonl'), recursive=True):
@@ -550,16 +573,49 @@ def index_worker():
                             start_raw = data.get('startTime', mtime)
                             date_str, raw_ts = format_date(start_raw)
                             machine = 'DKR' if 'docker' in f.lower() else ('WIN' if 'windows' in f.lower() else 'LNX')
-                            CHAT_MESSAGES[uid] = {
-                                "msgs": data.get('messages', []), "sid": sid, "machine": machine,
-                                "source": "codex", "date": date_str, "raw_date": raw_ts, "start_raw": start_raw
-                            }
+                            CHAT_MESSAGES[uid] = {"msgs": data.get('messages', []), "sid": sid, "machine": machine, "source": "codex", "date": date_str, "raw_date": raw_ts, "start_raw": start_raw}
                             file_metadata[uid] = mtime
                             something_changed = True
                     if uid in CHAT_MESSAGES:
                         m = CHAT_MESSAGES[uid]
                         skill = match_skill(m.get('start_raw'), 'codex')
-                        current_chats[uid] = {**m, 'uid': uid, 'skill': skill, 'summary': get_summary(m['msgs'], 'codex')}
+                        current_chats[uid] = compact_chat_item(uid, m, skill, get_summary(m['msgs'], 'codex'))
+
+            if os.path.isdir(CHATGPT_SITE_DIR):
+                for f in glob.glob(os.path.join(CHATGPT_SITE_DIR, '**', '*.json'), recursive=True):
+                    fname = os.path.basename(f)
+                    rel_name = os.path.relpath(f, CHATGPT_SITE_DIR).replace(os.sep, '__')
+                    uid = f"chatgpt-{rel_name}"
+                    mtime = os.path.getmtime(f)
+                    if uid not in file_metadata or file_metadata[uid] < mtime:
+                        try:
+                            with open(f, 'r', encoding='utf-8') as j:
+                                data = json.load(j)
+                                proc = []
+                                for msg in data.get('messages', []):
+                                    role = msg.get('type') or msg.get('role') or 'chatgpt'
+                                    role = 'user' if role == 'user' else 'chatgpt'
+                                    content = clean_content(msg.get('content', ''))
+                                    if content:
+                                        mc = msg.copy(); mc['type'] = role; mc['content'] = content
+                                        proc.append(mc)
+                                if not proc:
+                                    continue
+                                sid = data.get("sessionId") or fname.replace(".json", "")
+                                start_raw = data.get('startTime') or data.get('capturedAt') or mtime
+                                date_str, raw_ts = format_date(start_raw)
+                                summary = data.get('summary') or get_summary(proc, 'chatgpt')
+                                if data.get('title') and summary == get_summary(proc, 'chatgpt'):
+                                    summary = data.get('title')
+                                CHAT_MESSAGES[uid] = {"msgs": proc, "sid": sid, "machine": "WEB", "source": "chatgpt", "date": date_str, "raw_date": raw_ts, "start_raw": start_raw, "url": data.get("url", ""), "title": data.get("title", "")}
+                                file_metadata[uid] = mtime
+                                something_changed = True
+                        except Exception as e:
+                            print(f'[ChatGPT] parse error {f}: {e}')
+                            continue
+                    if uid in CHAT_MESSAGES:
+                        m = CHAT_MESSAGES[uid]
+                        current_chats[uid] = compact_chat_item(uid, m, None, m.get('title') or get_summary(m['msgs'], 'chatgpt'))
 
             if something_changed:
                 sorted_list = list(current_chats.values())
@@ -570,23 +626,27 @@ def index_worker():
                 if GEMINI_API_KEY:
                     threading.Thread(target=update_embed_index, daemon=True).start()
 
-        except Exception as e:
-            print(f'Worker Error: {e}')
-
-        # Run daily distillation around 23:45 local time.
+        except Exception as e: print(f'Worker Error: {e}')
+        
         now = datetime.now()
         if now.hour == 23 and now.minute >= 45 and last_distill_date != now.date():
             last_distill_date = now.date()
+            # Prontuário psicológico PRIMEIRO: assim a memória do dia já lê o ludovico_dna fresco
+            # (terapia do dia entra na injeção do skippy na mesma noite, sem lag de 1 ciclo).
             try:
                 import importlib
-                importlib.reload(memory_distiller)
-                memory_distiller.distill_memory()
-                print(f'[{now}] [Distill] Memory profile updated.')
+                importlib.reload(ludovico_distiller)
+                ludovico_distiller.distill_memory()
+                print(f'[{now}] [Ludovico] Prontuário updated.')
+            except Exception as e:
+                print(f'[{now}] [Ludovico] Error: {e}')
+            try:
+                import importlib
                 importlib.reload(daily_auditor)
                 daily_auditor.generate_daily_audit()
-                print(f'[{now}] [Distill] Daily audit updated.')
+                print(f'[{now}] [Daily Audit] Updated.')
             except Exception as e:
-                print(f'[{now}] [Distill] Error: {e}')
+                print(f'[{now}] [Daily Audit] Error: {e}')
         time.sleep(150)
 
 # ─── HTTP HANDLER ────────────────────────────────────────────────────────────
@@ -602,31 +662,43 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(json.dumps(CHAT_INDEX).encode('utf-8'))
             elif self.path.startswith('/api/chat/'):
                 uid = self.path.replace('/api/chat/', '')
-                data = CHAT_MESSAGES.get(uid, {"msgs": []})
+                data = CHAT_MESSAGES.get(uid, {"msgs":[]})
                 self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
                 self.wfile.write(json.dumps(data).encode('utf-8'))
-            elif self.path == '/api/memory/profile':
-                dna_path = os.path.join(DATA_DIR, 'memory_profile.json')
+            elif self.path == '/api/memory/ludovico':
+                dna_path = os.path.join(DATA_DIR, 'ludovico_dna.json')
                 if os.path.exists(dna_path):
                     with open(dna_path, 'r', encoding='utf-8') as f: data = f.read()
                     self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
                     self.wfile.write(data.encode('utf-8'))
-                else:
-                    self.send_response(404); self.end_headers(); self.wfile.write(b'{"error": "not found"}')
+                else: self.send_response(404); self.end_headers(); self.wfile.write(b'{"error": "not found"}')
             elif self.path == '/api/memory/daily':
                 daily_path = os.path.join(DATA_DIR, 'daily_audit.json')
                 if os.path.exists(daily_path):
                     with open(daily_path, 'r', encoding='utf-8') as f: data = f.read()
                     self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
                     self.wfile.write(data.encode('utf-8'))
-                else:
-                    self.send_response(404); self.end_headers(); self.wfile.write(b'{"error": "not found"}')
+                else: self.send_response(404); self.end_headers(); self.wfile.write(b'{"error": "not found"}')
+            elif self.path == '/api/memory/core':
+                core_path = os.path.join(DATA_DIR, 'ai_config', 'user-core.md')
+                if os.path.exists(core_path):
+                    with open(core_path, 'r', encoding='utf-8') as f: data = f.read()
+                    self.send_response(200); self.send_header('Content-type', 'text/plain; charset=utf-8'); self.end_headers()
+                    self.wfile.write(data.encode('utf-8'))
+                else: self.send_response(404); self.end_headers(); self.wfile.write(b'core memory not found')
+            elif self.path == '/api/memory/memoria':
+                mem_path = os.path.join(DATA_DIR, 'ai_config', 'user-memory.md')
+                if os.path.exists(mem_path):
+                    with open(mem_path, 'r', encoding='utf-8') as f: data = f.read()
+                    self.send_response(200); self.send_header('Content-type', 'text/plain; charset=utf-8'); self.end_headers()
+                    self.wfile.write(data.encode('utf-8'))
+                else: self.send_response(404); self.end_headers(); self.wfile.write(b'day memory not found')
             elif self.path == '/api/memory/weekly':
-                # Regenerated on each call (cost: 1 LLM completion). Cron the endpoint, don't cache.
+                # Sempre regenera — chamado 1×/semana pelo n8n. Custo: 1 call DeepSeek.
                 try:
-                    import weekly_digest, importlib
-                    importlib.reload(weekly_digest)
-                    digest = weekly_digest.generate_weekly_digest()
+                    import weekly_distiller, importlib
+                    importlib.reload(weekly_distiller)
+                    digest = weekly_distiller.generate_weekly_digest()
                     if digest:
                         self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
                         self.wfile.write(json.dumps(digest, ensure_ascii=False).encode('utf-8'))
@@ -647,12 +719,9 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                 }
                 self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
                 self.wfile.write(json.dumps(status).encode('utf-8'))
-            elif self.path == '/favicon.ico':
-                self.send_response(204); self.end_headers()
-            else:
-                self.send_error(404)
-        except Exception as e:
-            self.send_response(500); self.end_headers(); self.wfile.write(str(e).encode())
+            elif self.path == '/favicon.ico': self.send_response(204); self.end_headers()
+            else: self.send_error(404)
+        except Exception as e: self.send_response(500); self.end_headers(); self.wfile.write(str(e).encode())
 
     def do_POST(self):
         try:
@@ -709,14 +778,11 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
         return self.get_template().replace('{{OPTS}}', opts).replace('{{META_JSON}}', json.dumps(SKILLS_MAP))
 
     def get_template(self):
-        return TEMPLATE
-
-
-TEMPLATE = """<!DOCTYPE html>
-<html lang="en">
+        return """<!DOCTYPE html>
+<html lang="pt-BR">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cockpit</title>
+    <title>Cockpit v6.2</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
@@ -735,91 +801,391 @@ TEMPLATE = """<!DOCTYPE html>
         }
         * { box-sizing: border-box; }
         body { background: var(--bg-primary); color: var(--text-primary); height: 100vh; overflow: hidden; font-family: 'Inter', -apple-system, system-ui, sans-serif; margin: 0; }
-        .sidebar { background: var(--bg-secondary); border-right: 1px solid var(--border); height: 100vh; display: flex; flex-direction: column; }
-        .sidebar-header { padding: 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-        .sidebar-header h6 { font-size: 0.7rem; letter-spacing: 2px; font-weight: 700; color: var(--accent-blue); margin: 0 0 12px 0; display: flex; align-items: center; gap: 8px; }
-        .sidebar-header h6::before { content: ''; width: 6px; height: 6px; background: var(--accent-green); border-radius: 50%; box-shadow: 0 0 8px var(--accent-green); display: inline-block; }
+
+        /* SIDEBAR */
+        .sidebar {
+            background: var(--bg-secondary);
+            border-right: 1px solid var(--border);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .sidebar-header {
+            padding: 16px;
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+        .sidebar-header h6 {
+            font-size: 0.7rem;
+            letter-spacing: 2px;
+            font-weight: 700;
+            color: var(--accent-blue);
+            margin: 0 0 12px 0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .sidebar-header h6::before {
+            content: '';
+            width: 6px;
+            height: 6px;
+            background: var(--accent-green);
+            border-radius: 50%;
+            box-shadow: 0 0 8px var(--accent-green);
+            display: inline-block;
+        }
         .search-row { display: flex; gap: 4px; margin-bottom: 0; }
-        .search-input { background: var(--bg-primary); border: 1px solid var(--border); color: var(--text-primary); font-size: 0.8rem; border-radius: 8px; padding: 8px 12px; flex: 1; transition: border-color 0.2s; }
+        .search-input {
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            font-size: 0.8rem;
+            border-radius: 8px;
+            padding: 8px 12px;
+            flex: 1;
+            transition: border-color 0.2s;
+        }
         .search-input:focus { border-color: var(--accent-blue); outline: none; box-shadow: 0 0 0 2px rgba(59,130,246,0.15); }
         .search-input::placeholder { color: var(--text-muted); }
         .search-input.semantic-active { border-color: var(--accent-purple); box-shadow: 0 0 0 2px rgba(168,85,247,0.15); }
-        .search-btn { background: var(--bg-primary); border: 1px solid var(--border); color: var(--text-muted); padding: 6px 10px; border-radius: 8px; cursor: pointer; font-size: 0.8rem; transition: all 0.15s; white-space: nowrap; display: flex; align-items: center; gap: 4px; }
+        .search-btn {
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            padding: 6px 10px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            transition: all 0.15s;
+            white-space: nowrap;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
         .search-btn:hover { color: var(--accent-purple); border-color: var(--accent-purple); }
         .search-btn.active { background: rgba(168,85,247,0.15); color: var(--accent-purple); border-color: var(--accent-purple); }
-        .search-mode-badge { font-size: 0.6rem; padding: 2px 8px; border-radius: 10px; margin-top: 6px; display: none; align-items: center; gap: 4px; }
+        .search-mode-badge {
+            font-size: 0.6rem;
+            padding: 2px 8px;
+            border-radius: 10px;
+            margin-top: 6px;
+            display: none;
+            align-items: center;
+            gap: 4px;
+        }
         .search-mode-badge.show { display: flex; }
         .search-mode-badge.mode-semantic { background: rgba(168,85,247,0.15); color: var(--accent-purple); border: 1px solid rgba(168,85,247,0.3); }
+        .search-mode-badge.mode-filter { background: rgba(59,130,246,0.1); color: var(--accent-blue); border: 1px solid rgba(59,130,246,0.2); }
         .filter-row { display: flex; gap: 4px; margin-top: 8px; }
-        .filter-btn { flex: 1; background: var(--bg-primary); border: 1px solid var(--border); color: var(--text-muted); font-size: 0.7rem; font-weight: 600; padding: 6px 0; border-radius: 6px; cursor: pointer; transition: all 0.15s; text-align: center; }
+        .filter-grid { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
+        .filter-btn {
+            flex: 1 1 calc(50% - 4px);
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            font-size: 0.7rem;
+            font-weight: 600;
+            padding: 6px 0;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.15s;
+            text-align: center;
+        }
         .filter-btn:hover, .filter-btn.active { background: var(--bg-tertiary); color: var(--text-primary); border-color: var(--accent-blue); }
-        .filter-select { background: var(--bg-primary); border: 1px solid var(--border); color: #c0ccda; font-size: 0.7rem; padding: 6px 8px; border-radius: 6px; width: 100%; margin-top: 6px; }
+        .filter-btn-all { flex: 1 1 100%; }
+        .filter-select {
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            color: #c0ccda;
+            font-size: 0.7rem;
+            padding: 6px 8px;
+            border-radius: 6px;
+            width: 100%;
+            margin-top: 6px;
+        }
         .filter-select:focus { border-color: var(--accent-blue); outline: none; }
         .filter-select option { background: #111720; color: #e8ecf2; padding: 6px; }
+        .filter-select option:checked { background: #253345; }
+
+        /* CHAT LIST */
         .chat-list { overflow-y: auto; flex: 1; }
-        .chat-item { padding: 12px 16px; border-bottom: 1px solid rgba(30,42,58,0.5); cursor: pointer; transition: background 0.15s; border-left: 3px solid transparent; }
+        .chat-item {
+            padding: 12px 16px;
+            border-bottom: 1px solid rgba(30,42,58,0.5);
+            cursor: pointer;
+            transition: background 0.15s;
+            border-left: 3px solid transparent;
+        }
         .chat-item:hover { background: var(--bg-tertiary); }
         .chat-item.active { background: var(--bg-tertiary); }
         .chat-item.active.src-gemini { border-left-color: var(--accent-blue); }
         .chat-item.active.src-claude { border-left-color: var(--accent-amber); }
         .chat-item.active.src-codex { border-left-color: var(--accent-green); }
-        .chat-item-meta { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+        .chat-item.active.src-deepseek { border-left-color: var(--accent-purple); }
+        .chat-item.active.src-chatgpt { border-left-color: #10b981; }
+        .chat-item-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 4px;
+        }
         .chat-item-badges { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
-        .badge-src { font-size: 0.5rem; padding: 2px 6px; border-radius: 3px; text-transform: uppercase; font-weight: 800; letter-spacing: 0.5px; }
+        .badge-src {
+            font-size: 0.5rem;
+            padding: 2px 6px;
+            border-radius: 3px;
+            text-transform: uppercase;
+            font-weight: 800;
+            letter-spacing: 0.5px;
+        }
         .badge-gemini { background: rgba(59,130,246,0.2); color: var(--accent-blue); }
         .badge-claude { background: rgba(245,158,11,0.2); color: var(--accent-amber); }
         .badge-codex { background: rgba(34,197,94,0.18); color: var(--accent-green); }
+        .badge-deepseek { background: rgba(168,85,247,0.18); color: var(--accent-purple); }
+        .badge-chatgpt { background: rgba(16,185,129,0.18); color: #34d399; }
         .badge-win { background: rgba(59,130,246,0.15); color: #60a5fa; }
         .badge-lnx { background: rgba(245,158,11,0.15); color: #fbbf24; }
         .badge-dkr { background: rgba(168,85,247,0.15); color: #c084fc; }
-        .badge-skill { font-size: 0.5rem; padding: 2px 6px; border-radius: 3px; background: rgba(34,197,94,0.15); color: var(--accent-green); font-weight: 700; }
+        .badge-web { background: rgba(16,185,129,0.15); color: #34d399; }
+        .badge-skill {
+            font-size: 0.5rem;
+            padding: 2px 6px;
+            border-radius: 3px;
+            background: rgba(34,197,94,0.15);
+            color: var(--accent-green);
+            font-weight: 700;
+        }
         .chat-item-date { font-size: 0.65rem; color: var(--text-muted); }
-        .chat-item-summary { font-size: 0.8rem; color: var(--text-primary); opacity: 0.95; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.4; }
-        .chat-item-snippet { font-size: 0.72rem; color: var(--text-muted); line-height: 1.5; margin-top: 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .chat-item-summary {
+            font-size: 0.8rem;
+            color: var(--text-primary);
+            opacity: 0.95;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            line-height: 1.4;
+        }
+        .chat-item-snippet {
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            line-height: 1.5;
+            margin-top: 4px;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
         .snippet-highlight { color: var(--accent-purple); font-weight: 600; }
-        .main-panel { height: 100vh; display: flex; flex-direction: column; background: var(--bg-primary); }
-        .chat-header { padding: 12px 24px; border-bottom: 1px solid var(--border); background: var(--bg-secondary); display: none; align-items: center; justify-content: space-between; flex-shrink: 0; }
+
+        /* MAIN CONTENT */
+        .main-panel {
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-primary);
+        }
+
+        /* CHAT HEADER BAR */
+        .chat-header {
+            padding: 12px 24px;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-secondary);
+            display: none;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+        }
         .chat-header.visible { display: flex; }
-        .chat-header-left { display: flex; align-items: center; gap: 12px; font-size: 0.8rem; color: var(--text-muted); min-width: 0; flex: 1; }
-        .chat-header-cmd { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.75rem; color: var(--accent-green); background: var(--bg-primary); padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .chat-header-skill { font-size: 0.7rem; padding: 3px 8px; border-radius: 4px; background: rgba(34,197,94,0.15); color: var(--accent-green); font-weight: 700; white-space: nowrap; }
+        .chat-header-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            min-width: 0;
+            flex: 1;
+        }
+        .chat-header-cmd {
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 0.75rem;
+            color: var(--accent-green);
+            background: var(--bg-primary);
+            padding: 4px 10px;
+            border-radius: 4px;
+            border: 1px solid var(--border);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .chat-header-skill {
+            font-size: 0.7rem;
+            padding: 3px 8px;
+            border-radius: 4px;
+            background: rgba(34,197,94,0.15);
+            color: var(--accent-green);
+            font-weight: 700;
+            white-space: nowrap;
+        }
         .chat-header-actions { display: flex; gap: 6px; flex-shrink: 0; }
-        .header-btn { background: var(--bg-primary); border: 1px solid var(--border); color: var(--text-muted); padding: 5px 10px; border-radius: 6px; font-size: 0.75rem; cursor: pointer; transition: all 0.15s; display: flex; align-items: center; gap: 4px; }
+        .header-btn {
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            padding: 5px 10px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            cursor: pointer;
+            transition: all 0.15s;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
         .header-btn:hover { color: var(--text-primary); border-color: var(--accent-blue); background: var(--bg-tertiary); }
         .header-btn.share-btn:hover { border-color: var(--accent-green); color: var(--accent-green); }
-        .messages-scroll { flex: 1; overflow-y: auto; padding: 24px; }
-        .welcome { height: 100%; display: flex; align-items: center; justify-content: center; opacity: 0.15; }
+
+        /* MESSAGES */
+        .messages-scroll {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px;
+        }
+        .welcome {
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0.15;
+        }
         .welcome h1 { font-size: 2.5rem; font-weight: 800; letter-spacing: 4px; margin: 0; }
         .welcome p { font-size: 0.85rem; letter-spacing: 2px; margin: 4px 0 0 0; }
-        .message { margin-bottom: 20px; padding: 16px 20px; border-radius: 12px; max-width: 88%; position: relative; line-height: 1.7; font-size: 0.9rem; }
+
+        .message {
+            margin-bottom: 20px;
+            padding: 16px 20px;
+            border-radius: 12px;
+            max-width: 88%;
+            position: relative;
+            line-height: 1.7;
+            font-size: 0.9rem;
+        }
         .message p { margin-bottom: 8px; }
         .message p:last-child { margin-bottom: 0; }
-        .msg-user { background: var(--bg-tertiary); margin-left: auto; border: 1px solid var(--border); }
-        .msg-assistant { background: var(--bg-secondary); border: 1px solid var(--border); border-left: 3px solid var(--accent-blue); }
+        .msg-user {
+            background: var(--bg-tertiary);
+            margin-left: auto;
+            border: 1px solid var(--border);
+        }
+        .msg-assistant {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--accent-blue);
+        }
         .msg-assistant.from-claude { border-left-color: var(--accent-amber); }
         .msg-assistant.from-codex { border-left-color: var(--accent-green); }
-        .msg-role { font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--text-muted); margin-bottom: 8px; }
-        pre { background: #010409 !important; padding: 14px; border-radius: 8px; border: 1px solid var(--border); overflow-x: auto; margin: 10px 0; }
+        .msg-assistant.from-deepseek { border-left-color: var(--accent-purple); }
+        .msg-assistant.from-chatgpt { border-left-color: #10b981; }
+        .msg-role {
+            font-size: 0.65rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+        }
+
+        /* CODE BLOCKS */
+        pre {
+            background: #010409 !important;
+            padding: 14px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            overflow-x: auto;
+            margin: 10px 0;
+        }
         code { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.82rem; }
-        p code, li code { background: rgba(59,130,246,0.1); padding: 2px 6px; border-radius: 4px; font-size: 0.82rem; color: #a5d0ff; }
-        .dna-card { background: var(--bg-secondary); border: 1px solid var(--accent-amber); border-radius: 12px; padding: 24px; max-width: 100%; }
+        p code, li code {
+            background: rgba(59,130,246,0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.82rem;
+            color: #a5d0ff;
+        }
+
+        /* DNA PANEL */
+        .dna-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--accent-amber);
+            border-radius: 12px;
+            padding: 24px;
+            max-width: 100%;
+        }
         .dna-card h4 { color: var(--accent-amber); font-size: 1rem; font-weight: 700; letter-spacing: 1px; }
         .dna-section { margin-bottom: 16px; }
         .dna-section strong { color: var(--accent-amber); font-size: 0.8rem; }
+
+        /* LOADING */
         .loading-box { text-align: center; padding: 60px 0; }
         .loading-box .spinner-border { width: 1.5rem; height: 1.5rem; border-width: 2px; }
         .loading-box p { font-size: 0.8rem; color: var(--text-muted); margin-top: 12px; }
+
+        /* SCROLLBAR */
         ::-webkit-scrollbar { width: 5px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
         ::-webkit-scrollbar-thumb:hover { background: #2a3a4a; }
-        .toast-msg { position: fixed; bottom: 24px; right: 24px; background: var(--bg-tertiary); border: 1px solid var(--accent-green); color: var(--accent-green); padding: 10px 20px; border-radius: 8px; font-size: 0.8rem; font-weight: 600; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 999; }
+
+        /* TOAST */
+        .toast-msg {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--accent-green);
+            color: var(--accent-green);
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            opacity: 0;
+            transition: opacity 0.3s;
+            pointer-events: none;
+            z-index: 999;
+        }
         .toast-msg.show { opacity: 1; }
-        .share-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); backdrop-filter: blur(4px); z-index: 1000; display: none; align-items: center; justify-content: center; }
+
+        /* SHARE MODAL */
+        .share-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.7);
+            backdrop-filter: blur(4px);
+            z-index: 1000;
+            display: none;
+            align-items: center;
+            justify-content: center;
+        }
         .share-overlay.show { display: flex; }
-        .share-box { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 16px; padding: 28px; max-width: 440px; width: 90%; }
+        .share-box {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 28px;
+            max-width: 440px;
+            width: 90%;
+        }
         .share-box h5 { font-size: 0.95rem; font-weight: 700; margin-bottom: 16px; }
-        .share-option { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 10px; cursor: pointer; transition: all 0.15s; margin-bottom: 8px; }
+        .share-option {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 16px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            cursor: pointer;
+            transition: all 0.15s;
+            margin-bottom: 8px;
+        }
         .share-option:hover { border-color: var(--accent-blue); background: var(--bg-tertiary); }
         .share-option i { font-size: 1.2rem; color: var(--accent-blue); width: 24px; text-align: center; }
         .share-option-text { flex: 1; }
@@ -828,42 +1194,58 @@ TEMPLATE = """<!DOCTYPE html>
         .share-close { margin-top: 12px; text-align: center; }
         .share-close button { background: none; border: none; color: var(--text-muted); font-size: 0.8rem; cursor: pointer; }
         .share-close button:hover { color: var(--text-primary); }
-        .chat-count { font-size: 0.6rem; color: var(--text-muted); background: var(--bg-primary); padding: 2px 6px; border-radius: 10px; border: 1px solid var(--border); }
+
+        /* COUNT BADGE */
+        .chat-count {
+            font-size: 0.6rem;
+            color: var(--text-muted);
+            background: var(--bg-primary);
+            padding: 2px 6px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+        }
     </style>
 </head>
 <body>
     <div class="container-fluid p-0"><div class="row g-0">
+        <!-- SIDEBAR -->
         <div class="col-md-3 sidebar">
             <div class="sidebar-header">
-                <h6>COCKPIT</h6>
+                <h6>COCKPIT v6.2</h6>
                 <div class="d-flex gap-2" style="margin-bottom:4px;">
-                    <button class="header-btn" onclick="showProfile()" title="Memory Profile"><i class="bi bi-clipboard2-pulse"></i></button>
+                    <button class="header-btn" onclick="showDNA()" title="Prontuário Skippy"><i class="bi bi-clipboard2-pulse"></i></button>
                     <button class="header-btn" onclick="showDailyAudit()" title="Daily Audit"><i class="bi bi-journal-text"></i></button>
+                    <button class="header-btn" onclick="showCore()" title="Memória de Longo Prazo (Core)" style="font-size:1.05rem;line-height:1;">🐢</button>
                 </div>
                 <div class="search-row">
-                    <input type="text" id="search-box" class="search-input" placeholder="Search... (Enter = semantic)">
-                    <button class="search-btn" id="sem-btn" onclick="doSemanticSearch()" title="Semantic search">
+                    <input type="text" id="search-box" class="search-input" placeholder="Buscar... (Enter = semântico)">
+                    <button class="search-btn" id="sem-btn" onclick="doSemanticSearch()" title="Busca semântica por significado">
                         <i class="bi bi-stars"></i>
                     </button>
                 </div>
                 <div class="search-mode-badge" id="mode-badge">
                     <i class="bi bi-stars"></i> <span id="mode-label"></span>
-                    <span style="margin-left:auto;cursor:pointer;opacity:0.6;" onclick="clearSearch()">&times;</span>
+                    <span style="margin-left:auto;cursor:pointer;opacity:0.6;" onclick="clearSearch()">✕</span>
                 </div>
                 <div class="filter-row">
-                    <button class="filter-btn active" data-filter="all" onclick="setFilter('src','all',this)">All</button>
+                    <button class="filter-btn filter-btn-all active" data-filter="all" onclick="setFilter('src','all',this)">Todas</button>
+                </div>
+                <div class="filter-grid">
                     <button class="filter-btn" data-filter="gemini" onclick="setFilter('src','gemini',this)"><i class="bi bi-stars"></i> Gemini</button>
                     <button class="filter-btn" data-filter="claude" onclick="setFilter('src','claude',this)"><i class="bi bi-chat-dots"></i> Claude</button>
                     <button class="filter-btn" data-filter="codex" onclick="setFilter('src','codex',this)"><i class="bi bi-terminal"></i> Codex</button>
+                    <button class="filter-btn" data-filter="deepseek" onclick="setFilter('src','deepseek',this)"><i class="bi bi-lightning-charge"></i> DeepSeek</button>
+                    <button class="filter-btn" data-filter="chatgpt" onclick="setFilter('src','chatgpt',this)"><i class="bi bi-globe2"></i> ChatGPT</button>
                 </div>
                 <div class="d-flex gap-2">
-                    <select id="skill-filter" class="filter-select" style="flex:1"><option value="all">All skills</option>{{OPTS}}</select>
-                    <select id="mach-filter" class="filter-select" style="flex:1"><option value="all">All hosts</option><option value="WIN">WIN</option><option value="LNX">LNX</option><option value="DKR">DKR</option></select>
+                    <select id="skill-filter" class="filter-select" style="flex:1"><option value="all">Todas Skills</option>{{OPTS}}</select>
+                    <select id="mach-filter" class="filter-select" style="flex:1"><option value="all">Todas Maq</option><option value="WIN">WIN</option><option value="LNX">LNX</option><option value="DKR">DKR</option></select>
                 </div>
             </div>
             <div class="chat-list" id="chat-list"></div>
         </div>
 
+        <!-- MAIN -->
         <div class="col-md-9 main-panel">
             <div class="chat-header" id="chat-header">
                 <div class="chat-header-left">
@@ -872,51 +1254,53 @@ TEMPLATE = """<!DOCTYPE html>
                     <span class="chat-count" id="msg-count"></span>
                 </div>
                 <div class="chat-header-actions">
-                    <button class="header-btn" onclick="copyCmd()" title="Copy resume command"><i class="bi bi-clipboard"></i> Copy</button>
-                    <button class="header-btn share-btn" onclick="openShare()" title="Share"><i class="bi bi-share"></i> Share</button>
+                    <button class="header-btn" onclick="copyCmd()" title="Copiar comando"><i class="bi bi-clipboard"></i> Copiar</button>
+                    <button class="header-btn share-btn" onclick="openShare()" title="Compartilhar"><i class="bi bi-share"></i> Compartilhar</button>
                 </div>
             </div>
             <div class="messages-scroll" id="chat-display">
                 <div id="welcome-msg" class="welcome">
-                    <div class="text-center"><h1>COCKPIT</h1><p>Forensic UI</p></div>
+                    <div class="text-center"><h1>COCKPIT</h1><p>The Elder's Panopticon v6.2</p></div>
                 </div>
                 <div id="loading-overlay" style="display:none;" class="loading-box">
                     <div class="spinner-border text-primary"></div>
-                    <p>Loading session...</p>
+                    <p>Carregando sessao...</p>
                 </div>
                 <div id="messages-container"></div>
             </div>
         </div>
     </div></div>
 
+    <!-- SHARE MODAL -->
     <div class="share-overlay" id="share-modal">
         <div class="share-box">
-            <h5><i class="bi bi-share"></i> Share conversation</h5>
+            <h5><i class="bi bi-share"></i> Compartilhar conversa</h5>
             <div class="share-option" onclick="shareAsHTML()">
                 <i class="bi bi-filetype-html"></i>
                 <div class="share-option-text">
-                    <strong>Download as HTML</strong>
-                    <span>Standalone file — opens in any browser</span>
+                    <strong>Baixar como HTML</strong>
+                    <span>Arquivo standalone — abre em qualquer browser</span>
                 </div>
             </div>
             <div class="share-option" onclick="shareAsText()">
                 <i class="bi bi-clipboard2-data"></i>
                 <div class="share-option-text">
-                    <strong>Copy as text</strong>
-                    <span>Paste anywhere</span>
+                    <strong>Copiar como texto</strong>
+                    <span>Cola no WhatsApp, Telegram, email...</span>
                 </div>
             </div>
-            <div class="share-close"><button onclick="closeShare()">Cancel</button></div>
+            <div class="share-close"><button onclick="closeShare()">Cancelar</button></div>
         </div>
     </div>
 
+    <!-- TOAST -->
     <div class="toast-msg" id="toast"></div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script>
         let index = [], currentChat = null, currentItem = null, srcFilter = 'all';
-        let searchMode = 'filter';
+        let searchMode = 'filter'; // 'filter' | 'semantic'
         let semanticResults = null;
         const meta = {{META_JSON}};
 
@@ -985,6 +1369,8 @@ TEMPLATE = """<!DOCTYPE html>
             return s.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
         }
 
+        // ── SEMANTIC SEARCH ──────────────────────────────────────────────────
+
         async function doSemanticSearch() {
             const query = document.getElementById('search-box').value.trim();
             if (!query) { clearSearch(); return; }
@@ -1006,12 +1392,12 @@ TEMPLATE = """<!DOCTYPE html>
 
                 badge.className = 'search-mode-badge show mode-semantic';
                 document.getElementById('mode-label').textContent =
-                    `Semantic — ${semanticResults.length} results`;
+                    `Semântico — ${semanticResults.length} resultados`;
 
                 renderList(semanticResults, query);
             } catch(e) {
                 console.error(e);
-                toast('Semantic search error');
+                toast('Erro na busca semântica');
                 clearSearch();
             } finally {
                 btn.innerHTML = '<i class="bi bi-stars"></i>';
@@ -1029,12 +1415,15 @@ TEMPLATE = """<!DOCTYPE html>
             apply();
         }
 
+        // ── EVENTS ───────────────────────────────────────────────────────────
+
         document.getElementById('search-box').addEventListener('keydown', function(e) {
             if (e.key === 'Enter') {
                 doSemanticSearch();
             } else if (e.key === 'Escape') {
                 clearSearch();
             } else {
+                // Typing: switch back to fast filter mode
                 if (searchMode === 'semantic') {
                     searchMode = 'filter';
                     semanticResults = null;
@@ -1049,10 +1438,16 @@ TEMPLATE = """<!DOCTYPE html>
         document.getElementById('skill-filter').onchange = apply;
         document.getElementById('mach-filter').onchange = apply;
 
+        // ── CHAT DISPLAY ─────────────────────────────────────────────────────
+
         async function showChat(uid) {
             currentItem = index.find(i => i.uid === uid);
+            // Also check semantic results
             if (!currentItem && semanticResults) {
                 currentItem = semanticResults.find(i => i.uid === uid);
+            }
+            if (!currentItem) {
+                currentItem = {uid: uid, source: '', sid: '', date: '', skill: null, summary: ''};
             }
             document.querySelectorAll('.chat-item').forEach(e => e.classList.remove('active'));
             const el = document.getElementById('item-'+uid.replace(/[^a-zA-Z0-9]/g,'_'));
@@ -1073,12 +1468,22 @@ TEMPLATE = """<!DOCTYPE html>
                 currentChat.uid = uid;
                 loading.style.display = 'none';
 
-                const cmdMap = {
-                    claude: `claude --resume ${currentItem.sid}`,
-                    gemini: `gemini --resume ${currentItem.sid}`,
-                    codex: `codex resume ${currentItem.sid}`
+                const sessionId = currentItem.sid || currentChat.sid || '';
+                currentItem = {
+                    ...currentItem,
+                    sid: sessionId,
+                    source: currentItem.source || currentChat.source || 'chat',
+                    machine: currentItem.machine || currentChat.machine || '',
+                    date: currentItem.date || currentChat.date || '',
                 };
-                const cmd = cmdMap[currentItem.source] || `${currentItem.source} ${currentItem.sid}`;
+                const cmdMap = {
+                    claude: `claude --resume ${sessionId}`,
+                    gemini: `gemini --conversation ${sessionId}`,
+                    codex: `codex resume ${sessionId}`,
+                    deepseek: `deepseek --resume ${sessionId}`,
+                    chatgpt: currentChat.url || `https://chatgpt.com/c/${sessionId}`
+                };
+                const cmd = sessionId ? (cmdMap[currentItem.source] || `${currentItem.source} ${sessionId}`) : `chat ${uid}`;
                 document.getElementById('header-cmd').textContent = '> ' + cmd;
                 document.getElementById('msg-count').textContent = currentChat.msgs.length + ' msgs';
 
@@ -1096,7 +1501,7 @@ TEMPLATE = """<!DOCTYPE html>
                 container.innerHTML = currentChat.msgs.map(m => {
                     const isUser = m.type === 'user';
                     const cls = isUser ? 'msg-user' : `msg-assistant from-${src}`;
-                    const name = isUser ? 'User' : ({claude: 'Claude', gemini: 'Gemini', codex: 'Codex'}[src] || src);
+                    const name = isUser ? 'User' : ({claude: 'Claude', gemini: 'Gemini', codex: 'Codex', deepseek: 'DeepSeek', chatgpt: 'ChatGPT'}[src] || src);
                     return `<div class="message ${cls}"><div class="msg-role">${name}</div>${marked.parse(m.content||'')}</div>`;
                 }).join('');
 
@@ -1104,16 +1509,17 @@ TEMPLATE = """<!DOCTYPE html>
                 document.getElementById('chat-display').scrollTop = 0;
             } catch(e) {
                 loading.style.display = 'none';
-                container.innerHTML = '<p style="color:#ef4444;text-align:center;padding:40px;">Error loading conversation.</p>';
+                container.innerHTML = '<p style="color:#ef4444;text-align:center;padding:40px;">Erro ao carregar conversa.</p>';
             }
         }
 
         function copyCmd() {
             const text = document.getElementById('header-cmd').textContent.replace('> ','');
             navigator.clipboard.writeText(text);
-            toast('Command copied');
+            toast('Comando copiado!');
         }
 
+        // SHARE
         function openShare() { document.getElementById('share-modal').classList.add('show'); }
         function closeShare() { document.getElementById('share-modal').classList.remove('show'); }
 
@@ -1125,9 +1531,9 @@ TEMPLATE = """<!DOCTYPE html>
             const skillLabel = skillInfo ? ` &mdash; ${skillInfo.icon} ${skillInfo.name}` : '';
             let msgs = currentChat.msgs.map(m => {
                 const isUser = m.type === 'user';
-                const name = isUser ? 'User' : ({claude: 'Claude', gemini: 'Gemini', codex: 'Codex'}[src] || src);
+                const name = isUser ? 'User' : ({claude: 'Claude', gemini: 'Gemini', codex: 'Codex', deepseek: 'DeepSeek', chatgpt: 'ChatGPT'}[src] || src);
                 const bg = isUser ? '#1a2030' : '#111720';
-                const border = isUser ? '#1e2a3a' : ({claude: '#f59e0b', gemini: '#3b82f6', codex: '#22c55e'}[src] || '#3b82f6');
+                const border = isUser ? '#1e2a3a' : ({claude: '#f59e0b', gemini: '#3b82f6', codex: '#22c55e', deepseek: '#8b5cf6', chatgpt: '#10b981'}[src] || '#3b82f6');
                 const content = (m.content||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');
                 return `<div style="margin-bottom:16px;padding:16px 20px;border-radius:12px;max-width:88%;background:${bg};border:1px solid #1e2a3a;${isUser?'margin-left:auto;':'border-left:3px solid '+border+';'}">
                     <div style="font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#5a6a7a;margin-bottom:8px;">${name}</div>
@@ -1141,8 +1547,8 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
 .hdr{text-align:center;padding:20px 0 30px;border-bottom:1px solid #1e2a3a;margin-bottom:24px;}
 .hdr h2{font-size:1rem;color:#8899aa;font-weight:600;margin:0;letter-spacing:1px;}
 .hdr small{color:#3a4a5a;font-size:0.7rem;}</style></head>
-<body><div class="hdr"><h2>${src.toUpperCase()} SESSION${skillLabel}</h2><small>${date} &mdash; ${currentChat.msgs.length} messages</small></div>${msgs}
-<div style="text-align:center;padding:24px;color:#6a7a8a;font-size:0.65rem;border-top:1px solid #1e2a3a;margin-top:24px;">Exported from Cockpit</div></body></html>`;
+<body><div class="hdr"><h2>${src.toUpperCase()} SESSION${skillLabel}</h2><small>${date} &mdash; ${currentChat.msgs.length} mensagens</small></div>${msgs}
+<div style="text-align:center;padding:24px;color:#6a7a8a;font-size:0.65rem;border-top:1px solid #1e2a3a;margin-top:24px;">Exported from Cockpit v6.2</div></body></html>`;
 
             const blob = new Blob([html], {type: 'text/html'});
             const a = document.createElement('a');
@@ -1150,22 +1556,23 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
             a.download = `chat-${src}-${Date.now()}.html`;
             a.click();
             closeShare();
-            toast('HTML exported');
+            toast('HTML exportado!');
         }
 
         function shareAsText() {
             if (!currentChat || !currentItem) return;
             const src = currentItem.source;
             let txt = currentChat.msgs.map(m => {
-                const name = m.type === 'user' ? 'User' : ({claude: 'Claude', gemini: 'Gemini', codex: 'Codex'}[src] || src);
+                const name = m.type === 'user' ? 'User' : ({claude: 'Claude', gemini: 'Gemini', codex: 'Codex', deepseek: 'DeepSeek', chatgpt: 'ChatGPT'}[src] || src);
                 return `[${name}]\\n${m.content||''}`;
             }).join('\\n\\n---\\n\\n');
             navigator.clipboard.writeText(txt);
             closeShare();
-            toast('Text copied to clipboard');
+            toast('Texto copiado para o clipboard!');
         }
 
-        async function showProfile() {
+        // DNA
+        async function showDNA() {
             const welcome = document.getElementById('welcome-msg');
             const container = document.getElementById('messages-container');
             const loading = document.getElementById('loading-overlay');
@@ -1178,7 +1585,7 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
             currentChat = null;
 
             try {
-                const r = await fetch('/api/memory/profile');
+                const r = await fetch('/api/memory/ludovico');
                 const data = await r.json();
                 loading.style.display = 'none';
                 function formatDna(v) {
@@ -1190,7 +1597,9 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                             if (item.name || item.type) lines.push(`**${item.name || item.type}**`);
                             if (item.description) lines.push(item.description);
                             if (item.example) lines.push(`> *${item.example}*`);
-                            if (item.due_date) lines.push(`> Due: ${item.due_date}`);
+                            if (item.due_date) lines.push(`> Prazo: ${item.due_date}`);
+                            if (item.due_dates) lines.push(`> Datas: ${Object.entries(item.due_dates).map(([k,v])=>`${k}: ${v}`).join(' | ')}`);
+                            if (item.summary) lines.push(`**${String(item.date||'').slice(0,10)}** — ${item.summary}`);
                             return lines.join('\\n');
                         }).join('\\n\\n---\\n\\n');
                     }
@@ -1199,7 +1608,7 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                     }
                     return String(v);
                 }
-                let html = '<div class="dna-card"><h4><i class="bi bi-clipboard2-pulse"></i> MEMORY PROFILE</h4>';
+                let html = '<div class="dna-card"><h4><i class="bi bi-clipboard2-pulse"></i> PRONTUÁRIO SKIPPY</h4>';
                 for (const [k, v] of Object.entries(data)) {
                     html += `<div class="dna-section"><strong>${k.toUpperCase()}</strong><div style="font-size:0.85rem;margin-top:4px;">${marked.parse(formatDna(v))}</div></div>`;
                 }
@@ -1207,28 +1616,70 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                 container.innerHTML = html;
             } catch(e) {
                 loading.style.display = 'none';
-                container.innerHTML = '<p style="color:#ef4444;text-align:center;padding:40px;">Profile not found.</p>';
+                container.innerHTML = '<p style="color:#ef4444;text-align:center;padding:40px;">DNA nao encontrado.</p>';
             }
         }
 
-        // Generic category classifier — keyword heuristic for backfilling old audits
-        // that lack the `categories` field. Customize freely.
+        async function showCore() {
+            const welcome = document.getElementById('welcome-msg');
+            const container = document.getElementById('messages-container');
+            const loading = document.getElementById('loading-overlay');
+            const header = document.getElementById('chat-header');
+
+            welcome.style.display = 'none';
+            header.classList.remove('visible');
+            container.innerHTML = '';
+            loading.style.display = 'block';
+            currentChat = null;
+
+            try {
+                const [rc, rm] = await Promise.all([
+                    fetch('/api/memory/core'),
+                    fetch('/api/memory/memoria')
+                ]);
+                loading.style.display = 'none';
+                const coreMd = rc.ok ? await rc.text() : null;
+                const memMd  = rm.ok ? await rm.text() : null;
+                if (!coreMd && !memMd) {
+                    container.innerHTML = '<p style="color:#6a7a8a;text-align:center;padding:40px;">🐢 Memória ainda não gerada. Primeira consolidação roda hoje às 23:45.</p>';
+                    return;
+                }
+                let html = '<div class="dna-card"><h4>🐢 MEMÓRIA INJETADA NO SKIPPY</h4>';
+                html += '<div style="font-size:0.7rem;color:#6a7a8a;margin:-6px 0 16px;">Exatamente o contexto dinâmico injetado a cada boot do <code>skippy</code>: núcleo permanente + janela do dia. (Identidade estática — perfil/prontuário — vem à parte.)</div>';
+                html += '<div class="dna-section"><strong>📌 LONGO PRAZO &mdash; core (só muda por contradição)</strong>';
+                html += `<div style="font-size:0.9rem;margin-top:6px;">${coreMd ? marked.parse(coreMd) : '<em style="color:#6a7a8a;">Núcleo ainda não gerado — roda 23:45.</em>'}</div></div>`;
+                html += '<div class="dna-section" style="margin-top:16px;"><strong>🗓️ CURTO PRAZO &mdash; user-memory.md (janela 30 dias)</strong>';
+                html += `<div style="font-size:0.9rem;margin-top:6px;">${memMd ? marked.parse(memMd) : '<em style="color:#6a7a8a;">Sem memória de curto prazo.</em>'}</div></div>`;
+                html += '</div>';
+                container.innerHTML = html;
+            } catch(e) {
+                loading.style.display = 'none';
+                container.innerHTML = '<p style="color:#ef4444;text-align:center;padding:40px;">Erro ao carregar memória.</p>';
+            }
+        }
+
         function _classifyChatFallback(chat) {
             const t = ((chat.title || '') + ' ' + (chat.summary || '') + ' ' + (chat.long_summary || '')).toLowerCase();
             const rules = [
-                ['Infra',    /docker|server|vpn|nginx|kubernetes|hardware|network|firewall|proxy/],
-                ['Dev',      /code|debug|script|git |github|refactor|bug|python|javascript|node|typescript/],
-                ['AI',       /prompt|skill|mcp|claude|gemini|agent|llm|cockpit/],
-                ['Writing',  /write|article|blog|post|edit|draft|copy/],
-                ['Research', /research|study|paper|read|investigate|learn/],
-                ['Personal', /family|home|shopping|travel|life/],
+                ['Infra', /docker|vpn|wireguard|servidor|server|hass|home.?assistant|nginx|cloudflare|kubernetes|hardware|disco|hd |ssd |rede |firewall|proxmox/],
+                ['MSP-Support', /glpi|chamado|suporte|atendimento|ticket|ITSM/],
+                ['Business', /m365|office.?365|microsoft.?365|sharepoint|onedrive|proposta|prospecç|cliente|graal|casco|inpi|marca|venda|orçamento/],
+                ['Trading', /análise técnica|fundamental|treemap|gráfico de ações|skacoes/],
+                ['Finanças', /rdor3|trading|ações|b3 |stop.?loss|investimento|carteira|conta |fatura/],
+                ['Saúde', /médic|farmác|sintoma|exame|remédio|medicament|cortic|dor /],
+                ['IA-Tooling', /prompt|skill|mcp|claude code|gemini|agente|llm|cockpit|skippy/],
+                ['Dev', /código|debug|script|git |github|refactor|bug|python|javascript|node|typescript/],
+                ['Aprendizado', /tutorial|estudo|aprend|pesqu|docum/],
+                ['Pessoal', /família|casa |compra|lazer|currículo|vaga |emprego/]
             ];
             const hits = [];
             for (const [name, rx] of rules) if (rx.test(t)) hits.push(name);
-            return hits.length ? hits.slice(0, 2) : ['Other'];
+            return hits.length ? hits.slice(0, 2) : ['Outros'];
         }
 
         function _buildHeatmapData(entries) {
+            // Para cada entry, garante categories nos chats e day_metrics
+            const CATS = ['Infra','MSP-Support','Business','Dev','IA-Tooling','Trading','Finanças','Saúde','Aprendizado','Pessoal','Outros'];
             const present = new Set();
             const days = entries.map(e => {
                 const counts = {};
@@ -1241,11 +1692,13 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                 });
                 return { date: e.date, counts, total: (e.chats || []).length };
             });
-            const cats = Array.from(present).sort();
+            // ordena categorias pela ordem canônica, só as presentes
+            const cats = CATS.filter(c => present.has(c));
             return { cats, days };
         }
 
         function _heatColor(intensity) {
+            // 0..1 → teal escuro a teal claro
             if (intensity <= 0) return 'rgba(255,255,255,0.04)';
             const a = 0.15 + intensity * 0.7;
             return `rgba(20,184,166,${a.toFixed(2)})`;
@@ -1257,6 +1710,7 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
             if (!card) return;
             if (body) body.style.display = 'block';
             card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            // flash highlight
             const orig = card.style.boxShadow;
             const origBorder = card.style.borderColor;
             card.style.boxShadow = '0 0 0 2px rgba(20,184,166,0.6), 0 0 24px rgba(20,184,166,0.35)';
@@ -1281,63 +1735,68 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                 const data = await r.json();
                 loading.style.display = 'none';
 
-                let html = '<div class="dna-card"><h4><i class="bi bi-grid-3x3-gap-fill"></i> DAILY AUDIT DASHBOARD</h4><div style="margin-top:16px;">';
+                let html = '<div class="dna-card"><h4><i class="bi bi-grid-3x3-gap-fill"></i> DAILY PROTOPLASM AUDIT — DASHBOARD</h4><div style="margin-top:16px;">';
 
                 if (!Array.isArray(data) || data.length === 0) {
-                    html += '<p>No audits found.</p>';
+                    html += '<p>Nenhuma auditoria encontrada.</p>';
                     container.innerHTML = html + '</div></div>';
                     return;
                 }
 
+                // === STATS GLOBAIS (últimos 14 dias) ===
                 const totalSessions = data.reduce((s, e) => s + ((e.chats || []).length), 0);
                 const switchesArr = data.map(e => (e.day_metrics && e.day_metrics.context_switches) || null).filter(x => x != null);
                 const avgSwitches = switchesArr.length ? (switchesArr.reduce((a,b)=>a+b,0) / switchesArr.length).toFixed(1) : '—';
                 const latestFocus = (data[0].day_metrics && data[0].day_metrics.focus_score != null) ? data[0].day_metrics.focus_score : '—';
+                // tema dominante: contagem global de categorias
                 const heat = _buildHeatmapData(data);
                 const totalsByCat = {};
                 heat.days.forEach(d => Object.entries(d.counts).forEach(([k,v]) => { totalsByCat[k] = (totalsByCat[k] || 0) + v; }));
                 const dominantTheme = Object.entries(totalsByCat).sort((a,b)=>b[1]-a[1])[0];
                 const dominantLabel = dominantTheme ? `${dominantTheme[0]} (${dominantTheme[1]})` : '—';
 
+                // dia mais focado (maior focus_score)
                 const focusedDay = data.filter(e => e.day_metrics && e.day_metrics.focus_score != null)
                                        .sort((a,b) => b.day_metrics.focus_score - a.day_metrics.focus_score)[0];
                 const focusedLabel = focusedDay ? `${focusedDay.date} (${focusedDay.day_metrics.focus_score}/10)` : '—';
 
                 html += `<div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-bottom:24px;">
                     <div style="background:rgba(20,184,166,0.08); border:1px solid rgba(20,184,166,0.25); border-radius:8px; padding:14px;">
-                        <div style="color:#5eead4; font-size:0.7rem; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:6px;">Sessions (${data.length}d)</div>
+                        <div style="color:#5eead4; font-size:0.7rem; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:6px;">Sessões (${data.length}d)</div>
                         <div style="color:#fff; font-size:1.8rem; font-weight:700;">${totalSessions}</div>
                     </div>
                     <div style="background:rgba(139,92,246,0.08); border:1px solid rgba(139,92,246,0.25); border-radius:8px; padding:14px;">
-                        <div style="color:#a78bfa; font-size:0.7rem; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:6px;">Avg switches/day</div>
+                        <div style="color:#a78bfa; font-size:0.7rem; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:6px;">Switches médio/dia</div>
                         <div style="color:#fff; font-size:1.8rem; font-weight:700;">${avgSwitches}</div>
                     </div>
                     <div style="background:rgba(251,191,36,0.06); border:1px solid rgba(251,191,36,0.25); border-radius:8px; padding:14px;">
-                        <div style="color:#fbbf24; font-size:0.7rem; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:6px;">Focus on ${data[0].date || '?'}</div>
+                        <div style="color:#fbbf24; font-size:0.7rem; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:6px;">Foco em ${data[0].date || '?'}</div>
                         <div style="color:#fff; font-size:1.8rem; font-weight:700;">${latestFocus}<span style="font-size:0.9rem; color:#9ca3af;">/10</span></div>
                     </div>
                     <div style="background:rgba(59,130,246,0.08); border:1px solid rgba(59,130,246,0.25); border-radius:8px; padding:14px;">
-                        <div style="color:#60a5fa; font-size:0.7rem; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:6px;">Dominant theme</div>
+                        <div style="color:#60a5fa; font-size:0.7rem; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:6px;">Tema dominante</div>
                         <div style="color:#fff; font-size:1.05rem; font-weight:700; line-height:1.3;">${dominantLabel}</div>
                     </div>
                     <div style="background:rgba(34,197,94,0.06); border:1px solid rgba(34,197,94,0.25); border-radius:8px; padding:14px;">
-                        <div style="color:#4ade80; font-size:0.7rem; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:6px;">Most focused day</div>
+                        <div style="color:#4ade80; font-size:0.7rem; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:6px;">Dia mais focado</div>
                         <div style="color:#fff; font-size:0.95rem; font-weight:700; line-height:1.3;">${focusedLabel}</div>
                     </div>
                 </div>`;
 
+                // === HEATMAP ===
                 if (heat.cats.length > 0 && heat.days.length > 0) {
                     const maxCount = Math.max(1, ...heat.days.flatMap(d => Object.values(d.counts)));
+                    // dias mais antigos à esquerda → mais recentes à direita
                     const sortedDays = [...heat.days].reverse();
 
                     html += `<div style="margin-bottom:24px;">
-                        <div style="color:#9ca3af; font-size:0.75rem; letter-spacing:2px; text-transform:uppercase; margin-bottom:10px;"><i class="bi bi-grid-3x3"></i> Heatmap — categories x last ${sortedDays.length} days</div>
+                        <div style="color:#9ca3af; font-size:0.75rem; letter-spacing:2px; text-transform:uppercase; margin-bottom:10px;"><i class="bi bi-grid-3x3"></i> Heatmap — categorias × últimos ${sortedDays.length} dias</div>
                         <div style="overflow-x:auto;">
                         <table style="border-collapse:separate; border-spacing:3px; font-size:0.78rem;">
                             <thead><tr>
                                 <th style="text-align:right; padding-right:8px; color:#6b7280; font-weight:500; min-width:110px;"></th>`;
                     sortedDays.forEach(d => {
-                        const dd = (d.date || '').slice(5);
+                        const dd = (d.date || '').slice(5); // MM-DD
                         html += `<th style="color:#6b7280; font-weight:500; padding:2px 4px; min-width:34px; font-size:0.7rem;">${dd}</th>`;
                     });
                     html += `</tr></thead><tbody>`;
@@ -1348,7 +1807,7 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                             const intensity = c / maxCount;
                             const color = _heatColor(intensity);
                             const text = c > 0 ? c : '';
-                            const tip = c > 0 ? `${cat} - ${d.date}: ${c} session(s)` : '';
+                            const tip = c > 0 ? `${cat} — ${d.date}: ${c} sessão${c>1?'ões':''} (clique para abrir o dia)` : '';
                             const clickAttr = c > 0 ? ` onclick="_jumpToDay('${d.date}')" style="cursor:pointer; ` : ` style="`;
                             html += `<td title="${tip}"${clickAttr}background:${color}; width:30px; height:24px; text-align:center; border-radius:3px; color:${intensity>0.5?'#0f172a':'#9ca3af'}; font-weight:600; font-size:0.72rem;">${text}</td>`;
                         });
@@ -1357,7 +1816,8 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                     html += `</tbody></table></div></div>`;
                 }
 
-                html += `<div style="color:#9ca3af; font-size:0.75rem; letter-spacing:2px; text-transform:uppercase; margin-bottom:10px;"><i class="bi bi-calendar3"></i> History</div>`;
+                // === LISTA DE DIAS (compacta, click expande Skippy) ===
+                html += `<div style="color:#9ca3af; font-size:0.75rem; letter-spacing:2px; text-transform:uppercase; margin-bottom:10px;"><i class="bi bi-calendar3"></i> Histórico</div>`;
                 data.forEach((entry, entryIdx) => {
                     const dayId = `daybody_${entry.date}`;
                     const cardId = `daycard_${entry.date}`;
@@ -1375,20 +1835,20 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                                 ${focusBadge}
                                 ${switchBadge}
                             </div>
-                            <span style="color:#6b7280; font-size:0.78rem;">${(entry.chats || []).length} sessions <i class="bi bi-chevron-down"></i></span>
+                            <span style="color:#6b7280; font-size:0.78rem;">${(entry.chats || []).length} sessões <i class="bi bi-chevron-down"></i></span>
                         </div>
                         <div id="${dayId}" style="display:none; padding:0 14px 14px 14px; border-top:1px solid rgba(255,255,255,0.06);">`;
 
                     if (entry.headline) html += `<div style="font-size:1.05rem; font-weight:700; color:#fbbf24; margin:14px 0; line-height:1.4; font-style:italic;"><i class="bi bi-megaphone-fill" style="color:#f59e0b;"></i> ${entry.headline}</div>`;
                     if (entry.narrative) html += `<div style="background:rgba(20,184,166,0.05); border-left:3px solid #14b8a6; padding:12px 14px; margin-bottom:10px; line-height:1.6; color:#e5e7eb; font-size:0.92rem;">${entry.narrative}</div>`;
-                    if (entry.pattern_insight) html += `<div style="background:rgba(139,92,246,0.08); border-left:3px solid #8b5cf6; padding:10px 14px; margin-bottom:10px; color:#ddd6fe; font-size:0.88rem; line-height:1.5;"><strong style="color:#a78bfa;"><i class="bi bi-eye"></i> Pattern:</strong> ${entry.pattern_insight}</div>`;
+                    if (entry.pattern_insight) html += `<div style="background:rgba(139,92,246,0.08); border-left:3px solid #8b5cf6; padding:10px 14px; margin-bottom:10px; color:#ddd6fe; font-size:0.88rem; line-height:1.5;"><strong style="color:#a78bfa;"><i class="bi bi-eye"></i> Padrão:</strong> ${entry.pattern_insight}</div>`;
                     if (entry.fail_of_the_day) html += `<div style="background:rgba(239,68,68,0.06); border-left:3px solid #ef4444; padding:10px 14px; margin-bottom:10px; color:#fecaca; font-size:0.88rem; line-height:1.5;"><strong style="color:#f87171;"><i class="bi bi-bug-fill"></i> Fail:</strong> ${entry.fail_of_the_day}</div>`;
-                    if (entry.elder_verdict) html += `<div style="background:linear-gradient(90deg,rgba(20,184,166,0.1),rgba(0,0,0,0.2)); border:1px solid rgba(20,184,166,0.3); padding:12px 14px; margin-bottom:14px; color:#5eead4; font-size:0.92rem; line-height:1.5; border-radius:4px;"><strong style="color:#2dd4bf;"><i class="bi bi-stars"></i> Verdict:</strong> <em>${entry.elder_verdict}</em></div>`;
+                    if (entry.elder_verdict) html += `<div style="background:linear-gradient(90deg,rgba(20,184,166,0.1),rgba(0,0,0,0.2)); border:1px solid rgba(20,184,166,0.3); padding:12px 14px; margin-bottom:14px; color:#5eead4; font-size:0.92rem; line-height:1.5; border-radius:4px;"><strong style="color:#2dd4bf;"><i class="bi bi-stars"></i> Veredito:</strong> <em>${entry.elder_verdict}</em></div>`;
 
                     if (entry.chats && entry.chats.length > 0) {
                         html += `<div style="margin-top:8px;">
                             <div style="cursor:pointer; user-select:none; color:#9ca3af; font-size:0.82rem; padding:6px 0;" onclick="const el=document.getElementById('${chatsId}'); el.style.display = el.style.display==='none' ? 'block' : 'none';">
-                                <i class="bi bi-chevron-right"></i> drill-down: ${entry.chats.length} sessions
+                                <i class="bi bi-chevron-right"></i> drill-down: ${entry.chats.length} sessões
                             </div>
                             <ul id="${chatsId}" style="display:none; margin:6px 0 0 0; padding-left:0; list-style:none;">`;
                         entry.chats.forEach(chat => {
@@ -1398,11 +1858,15 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                                 <div style="color:#93c5fd; font-weight:600; margin-bottom:4px; font-size:0.9rem;">${chat.title || 'Chat'} ${cats}</div>
                                 <div style="font-size:0.83rem; color:#9ca3af; margin-bottom:6px;">${chat.summary || ''}</div>
                                 <div style="display:none; line-height:1.5; color:#cbd5e1; margin-bottom:8px; padding:8px; background:rgba(0,0,0,0.3); border-radius:3px; font-size:0.83rem;" id="ls_${safeUid}">${chat.long_summary || ''}</div>
-                                <button onclick="document.getElementById('ls_${safeUid}').style.display = document.getElementById('ls_${safeUid}').style.display==='none' ? 'block' : 'none';" style="background:rgba(255,255,255,0.05); color:#9ca3af; border:1px solid rgba(255,255,255,0.1); padding:3px 8px; border-radius:3px; font-size:0.72rem; cursor:pointer; margin-right:6px;"><i class="bi bi-arrows-expand"></i> details</button>
-                                <button onclick="showChat('${chat.uid}')" style="background:#3b82f6; color:white; border:none; padding:3px 8px; border-radius:3px; font-size:0.72rem; cursor:pointer;"><i class="bi bi-chat-left-text"></i> open chat</button>
+                                <button onclick="document.getElementById('ls_${safeUid}').style.display = document.getElementById('ls_${safeUid}').style.display==='none' ? 'block' : 'none';" style="background:rgba(255,255,255,0.05); color:#9ca3af; border:1px solid rgba(255,255,255,0.1); padding:3px 8px; border-radius:3px; font-size:0.72rem; cursor:pointer; margin-right:6px;"><i class="bi bi-arrows-expand"></i> resumo</button>
+                                <button onclick="showChat('${chat.uid}')" style="background:#3b82f6; color:white; border:none; padding:3px 8px; border-radius:3px; font-size:0.72rem; cursor:pointer;"><i class="bi bi-chat-left-text"></i> abrir chat</button>
                             </li>`;
                         });
                         html += `</ul></div>`;
+                    } else if (entry.summary && entry.summary.length > 0) {
+                        html += `<ul style="margin:8px 0 0 0; padding-left:20px; font-size:0.88rem; color:#d1d5db;">`;
+                        entry.summary.forEach(p => { html += `<li style="margin-bottom:4px;">${p}</li>`; });
+                        html += `</ul>`;
                     }
 
                     html += `</div></div>`;
@@ -1413,10 +1877,11 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                 return;
             } catch(e) {
                 loading.style.display = 'none';
-                container.innerHTML = '<p style="color:#ef4444;text-align:center;padding:40px;">Error loading daily audit.</p>';
+                container.innerHTML = '<p style="color:#ef4444;text-align:center;padding:40px;">Erro ao carregar auditoria diária.</p>';
                 return;
             }
         }
+
 
         function toast(msg) {
             const t = document.getElementById('toast');
@@ -1432,13 +1897,11 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
 </body>
 </html>"""
 
-
 if __name__ == "__main__":
-    os.makedirs(DATA_DIR, exist_ok=True)
     load_embed_index()
     threading.Thread(target=index_worker, daemon=True).start()
     print(f"--- COCKPIT v{APP_VERSION} STARTING ON PORT {PORT} ---")
-    print(f"--- Embeddings: {'ENABLED via Gemini' if GEMINI_API_KEY else 'DISABLED — set GEMINI_API_KEY for semantic search'} ---")
+    print(f"--- Embeddings: {'ENABLED via Gemini gemini-embedding-001' if GEMINI_API_KEY else 'DISABLED — set GEMINI_API_KEY'} ---")
     server_address = ('0.0.0.0', PORT)
     httpd = socketserver.ThreadingTCPServer(server_address, HistoryHandler)
     httpd.serve_forever()
