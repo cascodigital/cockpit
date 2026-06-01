@@ -631,15 +631,14 @@ def index_worker():
         now = datetime.now()
         if now.hour == 23 and now.minute >= 45 and last_distill_date != now.date():
             last_distill_date = now.date()
-            # Prontuário psicológico PRIMEIRO: assim a memória do dia já lê o ludovico_dna fresco
-            # (terapia do dia entra na injeção do skippy na mesma noite, sem lag de 1 ciclo).
+            # Atualiza o memory profile primeiro para a memória diária já ler o estado mais recente.
             try:
                 import importlib
                 importlib.reload(ludovico_distiller)
                 ludovico_distiller.distill_memory()
-                print(f'[{now}] [Ludovico] Prontuário updated.')
+                print(f'[{now}] [MemoryProfile] Updated.')
             except Exception as e:
-                print(f'[{now}] [Ludovico] Error: {e}')
+                print(f'[{now}] [MemoryProfile] Error: {e}')
             try:
                 import importlib
                 importlib.reload(daily_auditor)
@@ -1213,12 +1212,12 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
             <div class="sidebar-header">
                 <h6>COCKPIT v6.2</h6>
                 <div class="d-flex gap-2" style="margin-bottom:4px;">
-                    <button class="header-btn" onclick="showDNA()" title="Prontuário Skippy"><i class="bi bi-clipboard2-pulse"></i></button>
+                    <button class="header-btn" onclick="showDNA()" title="Memory Profile"><i class="bi bi-clipboard2-pulse"></i></button>
                     <button class="header-btn" onclick="showDailyAudit()" title="Daily Audit"><i class="bi bi-journal-text"></i></button>
                     <button class="header-btn" onclick="showCore()" title="Memória de Longo Prazo (Core)" style="font-size:1.05rem;line-height:1;">🐢</button>
                 </div>
                 <div class="search-row">
-                    <input type="text" id="search-box" class="search-input" placeholder="Buscar... (Enter = semântico)">
+                    <input type="text" id="search-box" class="search-input" placeholder="Buscar... (auto aprofunda se o filtro falhar)">
                     <button class="search-btn" id="sem-btn" onclick="doSemanticSearch()" title="Busca semântica por significado">
                         <i class="bi bi-stars"></i>
                     </button>
@@ -1302,6 +1301,8 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
         let index = [], currentChat = null, currentItem = null, srcFilter = 'all';
         let searchMode = 'filter'; // 'filter' | 'semantic'
         let semanticResults = null;
+        let searchDebounce = null;
+        let searchToken = 0;
         const meta = {{META_JSON}};
 
         async function load() {
@@ -1318,17 +1319,110 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
             if (searchMode === 'filter') apply();
         }
 
+        function resetSearchMode() {
+            searchMode = 'filter';
+            semanticResults = null;
+            document.getElementById('search-box').classList.remove('semantic-active');
+            document.getElementById('mode-badge').className = 'search-mode-badge';
+            document.getElementById('sem-btn').classList.remove('active');
+        }
+
+        function setModeBadge(modeClass, label) {
+            const badge = document.getElementById('mode-badge');
+            document.getElementById('mode-label').textContent = label;
+            badge.className = `search-mode-badge show ${modeClass}`;
+        }
+
+        async function runDeepSearch(query, opts = {}) {
+            const {auto = false, keepInput = true} = opts;
+            if (!query) {
+                if (!keepInput) clearSearch();
+                return [];
+            }
+
+            searchMode = 'semantic';
+            const btn = document.getElementById('sem-btn');
+            const startedToken = ++searchToken;
+            btn.innerHTML = '<div class="spinner-border spinner-border-sm" style="width:14px;height:14px;border-width:2px;"></div>';
+            btn.disabled = true;
+            btn.classList.add('active');
+            document.getElementById('search-box').classList.add('semantic-active');
+            setModeBadge('mode-semantic', auto ? 'Busca profunda...' : 'Busca semântica...');
+
+            try {
+                const r = await fetch('/api/search', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({query})
+                });
+                const results = await r.json();
+                if (startedToken !== searchToken) return results;
+
+                semanticResults = results;
+                setModeBadge('mode-semantic', `${auto ? 'Busca profunda' : 'Semântico'} — ${results.length} resultados`);
+                renderList(results, query);
+                return results;
+            } catch(e) {
+                if (startedToken === searchToken) {
+                    console.error(e);
+                    toast(auto ? 'Erro na busca profunda' : 'Erro na busca semântica');
+                    resetSearchMode();
+                    apply();
+                }
+                return [];
+            } finally {
+                if (startedToken === searchToken) {
+                    btn.innerHTML = '<i class="bi bi-stars"></i>';
+                    btn.disabled = false;
+                }
+            }
+        }
+
+        function scheduleDeepSearch(query, filteredCount) {
+            clearTimeout(searchDebounce);
+            if (query.length < 3 || filteredCount > 0) return;
+            const tokenAtSchedule = searchToken + 1;
+            searchDebounce = setTimeout(async () => {
+                if (document.getElementById('search-box').value.trim().toLowerCase() !== query) return;
+                if (searchMode !== 'filter') return;
+                const currentFiltered = index.filter(c => {
+                    const q = query;
+                    const matchTxt = !q || c.summary.toLowerCase().includes(q);
+                    const sk = document.getElementById('skill-filter').value;
+                    const mach = document.getElementById('mach-filter').value;
+                    const matchSk = (sk === 'all') || (c.skill === sk);
+                    const matchIA = (srcFilter === 'all') || (c.source === srcFilter);
+                    const matchMach = (mach === 'all') || (c.machine === mach);
+                    return matchTxt && matchSk && matchIA && matchMach;
+                });
+                if (currentFiltered.length === 0 && tokenAtSchedule > searchToken) {
+                    await runDeepSearch(query, {auto: true});
+                }
+            }, 250);
+        }
+
         function apply() {
             const t = document.getElementById('search-box').value.toLowerCase();
             const sk = document.getElementById('skill-filter').value;
             const mach = document.getElementById('mach-filter').value;
             const filtered = index.filter(c => {
-                const matchTxt = !t || c.summary.toLowerCase().includes(t) || (c.msgs && c.msgs.some(m => (m.content||'').toLowerCase().includes(t)));
+                const matchTxt = !t || c.summary.toLowerCase().includes(t);
                 const matchSk = (sk === 'all') || (c.skill === sk);
                 const matchIA = (srcFilter === 'all') || (c.source === srcFilter);
                 const matchMach = (mach === 'all') || (c.machine === mach);
                 return matchTxt && matchSk && matchIA && matchMach;
             });
+            if (t) {
+                if (filtered.length > 0) {
+                    setModeBadge('mode-filter', `Filtro rápido — ${filtered.length} resultados`);
+                } else {
+                    setModeBadge('mode-filter', 'Filtro rápido zerado; aprofundando...');
+                }
+                scheduleDeepSearch(t.trim(), filtered.length);
+            } else {
+                clearTimeout(searchDebounce);
+                resetSearchMode();
+            }
             renderList(filtered, null);
         }
 
@@ -1374,44 +1468,14 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
         async function doSemanticSearch() {
             const query = document.getElementById('search-box').value.trim();
             if (!query) { clearSearch(); return; }
-
-            searchMode = 'semantic';
-            const btn = document.getElementById('sem-btn');
-            const badge = document.getElementById('mode-badge');
-            btn.innerHTML = '<div class="spinner-border spinner-border-sm" style="width:14px;height:14px;border-width:2px;"></div>';
-            btn.disabled = true;
-            document.getElementById('search-box').classList.add('semantic-active');
-
-            try {
-                const r = await fetch('/api/search', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({query})
-                });
-                semanticResults = await r.json();
-
-                badge.className = 'search-mode-badge show mode-semantic';
-                document.getElementById('mode-label').textContent =
-                    `Semântico — ${semanticResults.length} resultados`;
-
-                renderList(semanticResults, query);
-            } catch(e) {
-                console.error(e);
-                toast('Erro na busca semântica');
-                clearSearch();
-            } finally {
-                btn.innerHTML = '<i class="bi bi-stars"></i>';
-                btn.disabled = false;
-            }
+            clearTimeout(searchDebounce);
+            await runDeepSearch(query, {auto: false});
         }
 
         function clearSearch() {
-            searchMode = 'filter';
-            semanticResults = null;
+            clearTimeout(searchDebounce);
             document.getElementById('search-box').value = '';
-            document.getElementById('search-box').classList.remove('semantic-active');
-            document.getElementById('mode-badge').className = 'search-mode-badge';
-            document.getElementById('sem-btn').classList.remove('active');
+            resetSearchMode();
             apply();
         }
 
@@ -1425,10 +1489,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
             } else {
                 // Typing: switch back to fast filter mode
                 if (searchMode === 'semantic') {
-                    searchMode = 'filter';
-                    semanticResults = null;
-                    document.getElementById('search-box').classList.remove('semantic-active');
-                    document.getElementById('mode-badge').className = 'search-mode-badge';
+                    resetSearchMode();
                 }
             }
         });
@@ -1608,7 +1669,7 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                     }
                     return String(v);
                 }
-                let html = '<div class="dna-card"><h4><i class="bi bi-clipboard2-pulse"></i> PRONTUÁRIO SKIPPY</h4>';
+                let html = '<div class="dna-card"><h4><i class="bi bi-clipboard2-pulse"></i> MEMORY PROFILE</h4>';
                 for (const [k, v] of Object.entries(data)) {
                     html += `<div class="dna-section"><strong>${k.toUpperCase()}</strong><div style="font-size:0.85rem;margin-top:4px;">${marked.parse(formatDna(v))}</div></div>`;
                 }
@@ -1644,8 +1705,8 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                     container.innerHTML = '<p style="color:#6a7a8a;text-align:center;padding:40px;">🐢 Memória ainda não gerada. Primeira consolidação roda hoje às 23:45.</p>';
                     return;
                 }
-                let html = '<div class="dna-card"><h4>🐢 MEMÓRIA INJETADA NO SKIPPY</h4>';
-                html += '<div style="font-size:0.7rem;color:#6a7a8a;margin:-6px 0 16px;">Exatamente o contexto dinâmico injetado a cada boot do <code>skippy</code>: núcleo permanente + janela do dia. (Identidade estática — perfil/prontuário — vem à parte.)</div>';
+                let html = '<div class="dna-card"><h4>🐢 INJECTED MEMORY CONTEXT</h4>';
+                html += '<div style="font-size:0.7rem;color:#6a7a8a;margin:-6px 0 16px;">Dynamic assistant context: long-term core plus recent working memory. Static identity/profile data stays separate.</div>';
                 html += '<div class="dna-section"><strong>📌 LONGO PRAZO &mdash; core (só muda por contradição)</strong>';
                 html += `<div style="font-size:0.9rem;margin-top:6px;">${coreMd ? marked.parse(coreMd) : '<em style="color:#6a7a8a;">Núcleo ainda não gerado — roda 23:45.</em>'}</div></div>`;
                 html += '<div class="dna-section" style="margin-top:16px;"><strong>🗓️ CURTO PRAZO &mdash; user-memory.md (janela 30 dias)</strong>';

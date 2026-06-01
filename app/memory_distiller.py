@@ -13,8 +13,7 @@ SKILL_LOG_PATH = os.path.join(DATA_DIR, "skill_log.jsonl")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 
-# Legado: matching por keyword no blob inteiro caçava o registry de skills (94 falsos p/ "skpsi").
-# Verdade-terra agora é o skill_log (ativações REAIS do skpsi). Mantido só p/ referência.
+# Legacy fallback kept only for reference; real matching comes from skill_log.
 LUDOVICO_KEYWORDS = ["skpsi", "leto ii", "ludovico von drake"]
 BRT = timezone(timedelta(hours=-3))
 
@@ -129,7 +128,7 @@ def build_prompt(chats, existing_dna):
     existing_hw = json.dumps(existing_dna.get("pending_homework", []), ensure_ascii=False)
 
     return (
-        "Voce e o Arquiteto de Memoria do Prof. Ludovico Von Drake (user's TCC psychologist).\n"
+        "Voce e um destilador de memoria para sessoes de coaching e reflexao.\n"
         "The user is a senior engineer.\n\n"
         "LOGS DA SESSAO PARA ANALISE:\n"
         f"{full_text[:25000]}\n\n"
@@ -180,26 +179,26 @@ def distill_memory():
 
     chats = get_new_psi_chats(since_dt)
     if not chats:
-        print(f"[Ludovico] Nenhuma sessao psi nova desde {since_dt}. DNA inalterado.")
+        print(f"[MemoryProfile] Nenhuma sessao psi nova desde {since_dt}. DNA inalterado.")
         return
 
-    print(f"[Ludovico] {len(chats)} sessao(es) nova(s) para processar.")
+    print(f"[MemoryProfile] {len(chats)} sessao(es) nova(s) para processar.")
     prompt = build_prompt(chats, existing_dna)
 
     raw_json = None
     try:
-        print("[Ludovico] Tentando DeepSeek...")
+        print("[MemoryProfile] Tentando DeepSeek...")
         raw_json = call_deepseek(prompt)
     except Exception as e:
-        print(f"[Ludovico] DeepSeek falhou: {e}. Tentando Gemini...")
+        print(f"[MemoryProfile] DeepSeek falhou: {e}. Tentando Gemini...")
         try:
             raw_json = call_gemini(prompt)
         except Exception as e2:
-            print(f"[Ludovico] Gemini falhou: {e2}. DNA inalterado.")
+            print(f"[MemoryProfile] Gemini falhou: {e2}. DNA inalterado.")
             return
 
     if not raw_json:
-        print("[Ludovico] Sem resposta das APIs. DNA inalterado.")
+        print("[MemoryProfile] Sem resposta das APIs. DNA inalterado.")
         return
 
     raw_json = raw_json.replace("```json", "").replace("```", "").strip()
@@ -245,7 +244,7 @@ def distill_memory():
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(existing_dna, f, indent=2, ensure_ascii=False)
-    print(f"[Ludovico] DNA atualizado com merge incremental. Bugs: {len(current_bugs)}, HW: {len(current_hw)}.")
+    print(f"[MemoryProfile] DNA atualizado com merge incremental. Bugs: {len(current_bugs)}, HW: {len(current_hw)}.")
 
 if __name__ == "__main__":
     distill_memory()
