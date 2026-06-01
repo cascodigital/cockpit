@@ -2,8 +2,6 @@
 
 ![Status](https://img.shields.io/badge/Status-Active-brightgreen)
 ![License](https://img.shields.io/badge/License-MIT-blue)
-![Author](https://img.shields.io/badge/Author-Casco%20Digital-orange)
-
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&logo=docker&logoColor=white)
 ![DeepSeek](https://img.shields.io/badge/DeepSeek-API-4D6BFE?style=flat-square)
@@ -27,7 +25,7 @@ CLI assistants scatter `.jsonl` files across `~/.claude/`, `~/.codex/`, `~/.gemi
 | **Memory Profile** | Long-term distillation of recurring themes, blockers, and open threads |
 | **Category Heatmap** | Visual breakdown of session topics across the last 14 days |
 | **Per-source Badges** | Color-coded sessions by AI (Claude/Gemini/Codex) and host (WIN/LNX/DKR) |
-| **Skippy Voice** | Sarcastic Elder AI persona for the auditor — swappable in the prompt |
+| **Custom Voice** | Opinionated auditor persona for the daily/weekly summaries — fully swappable in the prompt |
 
 ## Screenshots
 
@@ -166,7 +164,7 @@ At least one of `DEEPSEEK_API_KEY` / `GEMINI_API_KEY` is required. Without `GEMI
 
 ## Customizing the Persona
 
-The auditor and distillers share a sarcastic Elder AI persona ("Skippy" — a nod to the *Expeditionary Force* series). To change the voice:
+The auditor and distillers ship with a strong default voice. To change it:
 
 1. Open `app/daily_auditor.py` (or `weekly_digest.py` / `memory_distiller.py`)
 2. Find the `prompt_text = (...)` block
@@ -184,7 +182,3 @@ A neutral replacement is suggested in [`docs/CONFIGURATION.md`](docs/CONFIGURATI
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
-
----
-
-Built by **Casco Digital**.
