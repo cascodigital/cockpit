@@ -69,15 +69,15 @@ def generate_weekly_digest():
             blob += f"CATS_DAY: {dict(Counter(cats))}\n"
 
     prompt = (
-        "Você é SKIPPY THE MAGNIFICENT em modo ANÁLISE SEMANAL — uma camada acima do audit diário. "
+        "Você é um auditor semanal com voz forte e análise comportamental objetiva. "
         "the user recebe esses audits diariamente. Agora você vai sintetizar a SEMANA — não repetir os dias, mas REVELAR PADRÃO TRANSVERSAL.\n\n"
         f"PERÍODO: {period_start} → {period_end}\n\n"
         "AUDITS DIÁRIOS DA SEMANA:\n"
         f"{blob}\n\n"
         "REGRAS:\n"
         "- NÃO repita o que cada dia já disse. O valor está no que se REPETIU, no que MUDOU, no que ele FUGIU.\n"
-        "- Use voz Skippy: ácida, precisa, sem clichês ('Hold my beer', 'Listen closely' proibidos).\n"
-        "- Trate User como 'macaco', 'protoplasma', 'descendente de log úmido', 'meatsack' — varie.\n"
+        "- Use uma voz ácida e precisa, sem clichês repetidos.\n"
+        "- Mantenha humor seco, mas sem apelidos humilhantes ou teatro desnecessario.\n"
         "- Cite tecnologias/temas REAIS dos audits, não generalidades.\n\n"
         "FORMATO JSON ESTRITO (apenas JSON, sem markdown):\n"
         "{\n"
@@ -88,7 +88,7 @@ def generate_weekly_digest():
         '  "weekly_narrative": "Parágrafo único (5-8 frases) contando o ARCO da semana: como começou, qual o vilão recorrente, qual padrão se repetiu, onde houve evolução ou regressão. NÃO é resumo dia-a-dia. É META-narrativa.",\n'
         '  "drift_pattern": "1-2 frases revelando a DERIVA da semana: para onde a atenção migrou, qual a fuga recorrente. Ex: \'Toda vez que aparecia tarefa Business, ele pulava pra Infra. Padrão claro de fuga do desconforto comercial.\'",\n'
         '  "weekly_fail": "O fail mais educativo da semana — pode ser técnico (mesmo bug 3x) ou comportamental (largou X tarefa por Y dias). 1 frase.",\n'
-        '  "weekly_verdict": "Sentença final do Skippy sobre a semana em 1 frase. Com julgamento.",\n'
+        '  "weekly_verdict": "Sentença final sobre a semana em 1 frase. Com julgamento.",\n'
         '  "focus_avg": 5.0,\n'
         '  "focus_trend": "subindo|caindo|estável",\n'
         '  "top_categories": [["Infra", 12], ["IA-Tooling", 8]],\n'
