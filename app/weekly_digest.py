@@ -1,12 +1,3 @@
-"""
-Weekly Digest — second-order analysis over the last 7 daily audits.
-
-Reads daily_audit.json (rolling history) and asks Skippy to find patterns
-the daily audits couldn't see: what repeated, what drifted, what the user avoided.
-
-Triggered on-demand via GET /api/memory/weekly. Cron the endpoint if you want
-a recurring email/notification.
-"""
 import os
 import json
 from datetime import datetime
@@ -46,7 +37,7 @@ def call_gemini(prompt_text):
 
 def generate_weekly_digest():
     if not os.path.exists(DAILY_FILE):
-        print("daily_audit.json missing — no data to digest.")
+        print("daily_audit.json não existe — sem dados pra digerir.")
         return None
 
     with open(DAILY_FILE, "r", encoding="utf-8") as f:
@@ -54,7 +45,7 @@ def generate_weekly_digest():
 
     last7 = history[:7]
     if not last7:
-        print("History empty.")
+        print("Histórico vazio.")
         return None
 
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -78,54 +69,53 @@ def generate_weekly_digest():
             blob += f"CATS_DAY: {dict(Counter(cats))}\n"
 
     prompt = (
-        "You are SKIPPY THE MAGNIFICENT in WEEKLY ANALYSIS mode — one layer above the daily audit. "
-        "The user reads the daily audits already. Now synthesize the WEEK — do NOT repeat the days, "
-        "REVEAL the cross-cutting pattern.\n\n"
-        f"PERIOD: {period_start} -> {period_end}\n\n"
-        "DAILY AUDITS:\n"
+        "Você é SKIPPY THE MAGNIFICENT em modo ANÁLISE SEMANAL — uma camada acima do audit diário. "
+        "the user recebe esses audits diariamente. Agora você vai sintetizar a SEMANA — não repetir os dias, mas REVELAR PADRÃO TRANSVERSAL.\n\n"
+        f"PERÍODO: {period_start} → {period_end}\n\n"
+        "AUDITS DIÁRIOS DA SEMANA:\n"
         f"{blob}\n\n"
-        "RULES:\n"
-        "- Do NOT repeat what each day said. Value is in what REPEATED, what CHANGED, what they AVOIDED.\n"
-        "- Skippy voice: acidic, precise, no cliches ('Hold my beer', 'Listen closely' forbidden).\n"
-        "- Refer to the user with rotating dismissive terms ('meatsack', 'protoplasm', 'primate'). Vary.\n"
-        "- Cite REAL tech/themes from the audits, not generalities.\n\n"
-        "STRICT JSON FORMAT (JSON only, no markdown):\n"
+        "REGRAS:\n"
+        "- NÃO repita o que cada dia já disse. O valor está no que se REPETIU, no que MUDOU, no que ele FUGIU.\n"
+        "- Use voz Skippy: ácida, precisa, sem clichês ('Hold my beer', 'Listen closely' proibidos).\n"
+        "- Trate User como 'macaco', 'protoplasma', 'descendente de log úmido', 'meatsack' — varie.\n"
+        "- Cite tecnologias/temas REAIS dos audits, não generalidades.\n\n"
+        "FORMATO JSON ESTRITO (apenas JSON, sem markdown):\n"
         "{\n"
         f'  "period_start": "{period_start}",\n'
         f'  "period_end": "{period_end}",\n'
         f'  "generated_at": "{today_str}",\n'
-        '  "weekly_headline": "Single punchy headline for the whole week. e.g. \'The week the primate promised Infra and delivered Trading.\'",\n'
-        '  "weekly_narrative": "Single paragraph (5-8 sentences) telling the ARC of the week: how it started, recurring villain, repeating pattern, where evolution or regression happened. NOT a day-by-day. META-narrative.",\n'
-        '  "drift_pattern": "1-2 sentences revealing the WEEK\'S DRIFT: where attention migrated, what recurring escape. e.g. \'Every time an Admin task surfaced, they jumped to Infra. Clear avoidance pattern.\'",\n'
-        '  "weekly_fail": "Most educational fail of the week — technical (same bug 3x) or behavioral (abandoned X for Y days). 1 sentence.",\n'
-        '  "weekly_verdict": "Skippy\'s final verdict on the week in 1 sentence. With judgment.",\n'
+        '  "weekly_headline": "Manchete única da semana inteira em 1 frase punchy. Ex: \'A semana em que o macaco prometeu Infra e entregou Trading.\'",\n'
+        '  "weekly_narrative": "Parágrafo único (5-8 frases) contando o ARCO da semana: como começou, qual o vilão recorrente, qual padrão se repetiu, onde houve evolução ou regressão. NÃO é resumo dia-a-dia. É META-narrativa.",\n'
+        '  "drift_pattern": "1-2 frases revelando a DERIVA da semana: para onde a atenção migrou, qual a fuga recorrente. Ex: \'Toda vez que aparecia tarefa Business, ele pulava pra Infra. Padrão claro de fuga do desconforto comercial.\'",\n'
+        '  "weekly_fail": "O fail mais educativo da semana — pode ser técnico (mesmo bug 3x) ou comportamental (largou X tarefa por Y dias). 1 frase.",\n'
+        '  "weekly_verdict": "Sentença final do Skippy sobre a semana em 1 frase. Com julgamento.",\n'
         '  "focus_avg": 5.0,\n'
-        '  "focus_trend": "rising|falling|stable",\n'
-        '  "top_categories": [["Dev", 12], ["AI", 8]],\n'
+        '  "focus_trend": "subindo|caindo|estável",\n'
+        '  "top_categories": [["Infra", 12], ["IA-Tooling", 8]],\n'
         '  "days_count": 7\n'
         "}\n\n"
-        "NUMERIC RULES:\n"
-        "- focus_avg: arithmetic mean of valid focus_score values, 1 decimal.\n"
-        "- focus_trend: compare first 3 days vs last 3. 'rising' if delta > +1, 'falling' if delta < -1, else 'stable'.\n"
-        "- top_categories: top 3 categories aggregated across all chats of the week (use the CATS_DAY blobs)."
+        "INSTRUÇÕES NUMÉRICAS:\n"
+        "- focus_avg: média aritmética dos focus_score válidos (números) na semana, 1 decimal.\n"
+        "- focus_trend: compare primeiros 3 dias vs últimos 3. 'subindo' se delta > +1, 'caindo' se delta < -1, senão 'estável'.\n"
+        "- top_categories: top 3 categorias somando todas chats da semana (use os CATS_DAY fornecidos), formato [[cat, count], ...]."
     )
 
     try:
-        print("Generating weekly digest via DeepSeek...")
+        print("Gerando weekly digest via DeepSeek...")
         raw = call_deepseek(prompt)
         if not raw:
             raw = call_gemini(prompt)
         if not raw:
-            raise Exception("No LLM provider responded.")
+            raise Exception("Nenhuma API respondeu.")
         raw = raw.replace("```json", "").replace("```", "").strip()
         digest = json.loads(raw)
         digest["days_count"] = len(last7)
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             json.dump(digest, f, indent=2, ensure_ascii=False)
-        print(f"Weekly digest written to {OUTPUT_FILE}")
+        print(f"Weekly digest salvo em {OUTPUT_FILE}")
         return digest
     except Exception as e:
-        print(f"Weekly digest error: {e}")
+        print(f"Erro no weekly digest: {e}")
         return None
 
 
