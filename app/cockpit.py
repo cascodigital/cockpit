@@ -9,6 +9,7 @@ import re
 import time
 import subprocess
 import sys
+import unicodedata
 
 # AUTO-INSTALL DEPENDENCIES
 try:
@@ -36,9 +37,11 @@ CLAUDE_CONVERTED_DIR = os.environ.get('CLAUDE_CONVERTED', '/app/data/claude_conv
 CODEX_BASE_DIR = os.environ.get('CODEX_DATA', '/app/data/codex')
 CHATGPT_SITE_DIR = os.environ.get('CHATGPT_SITE_DATA', '/app/data/chatgpt_site')
 DATA_DIR = '/app/data'
-APP_VERSION = '6.2'
+APP_VERSION = '7.1'
 SKILL_LOG_PATH = os.path.join(DATA_DIR, 'skill_log.jsonl')
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')  # optional: enables LLM reranking
+RERANK_MODEL = os.environ.get('RERANK_MODEL', 'gpt-4o-mini')  # OpenAI model for reranking
+RERANK_TOP = int(os.environ.get('RERANK_TOP', '30'))  # how many candidates to rerank
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 EMBED_DISABLED = False  # set True on first API failure
 EMBED_RUNNING = False  # prevent concurrent embed threads
@@ -70,6 +73,8 @@ CHAT_MESSAGES = {}
 SKILL_LOG = []
 BM25_INDEX = None
 BM25_UIDS = []
+BM25_CHUNK_PARENTS = []  # parent uid per BM25 chunk (chunk-level index)
+BM25_CHUNK_TEXTS = []  # raw text per chunk (for best-chunk snippet / rerank input)
 EMBED_INDEX = {}
 SEARCH_LOCK = threading.Lock()
 
@@ -302,19 +307,29 @@ def compact_chat_item(uid, chat, skill, summary):
 
 # ─── SEARCH ENGINE ───────────────────────────────────────────────────────────
 
+def strip_accents(text):
+    """Fold diacritics so 'criacao' matches 'criação', 'maquina' matches 'máquina'."""
+    return ''.join(c for c in unicodedata.normalize('NFKD', text)
+                   if not unicodedata.combining(c))
+
 def tokenize(text):
-    return re.findall(r'\w+', text.lower())
+    return re.findall(r'\w+', strip_accents(text.lower()))
+
+# Caps high enough to index topics buried deep in long mixed-topic chats. With the old
+# 8000-char cap, a topic discussed at char ~56k of an 80k chat was never indexed at all.
+MSG_CAP = 4000
+CHAT_CAP = 120000
 
 def get_chat_text(uid):
-    """Build searchable text for a chat (all messages, capped at 8000 chars)."""
+    """Build searchable text for a chat (all messages, capped at CHAT_CAP chars)."""
     data = CHAT_MESSAGES.get(uid, {})
     msgs = data.get('msgs', [])
     parts = []
     for m in msgs:
         content = m.get('content', '')
         if content:
-            parts.append(content[:400])
-    return ' '.join(parts)[:8000]
+            parts.append(content[:MSG_CAP])
+    return ' '.join(parts)[:CHAT_CAP]
 
 def get_snippet(text, query_terms, context=220):
     """Extract a relevant snippet around the first matched term."""
@@ -335,16 +350,44 @@ def get_snippet(text, query_terms, context=220):
     suffix = '...' if end < len(text) else ''
     return prefix + text[start:end] + suffix
 
+def chunk_text(text, size=1500, overlap=250):
+    """Split text into overlapping windows. Chunk-level BM25 lets a topic buried in a long
+    mixed-topic chat rank on the dense chunk that contains it, instead of being washed out
+    by Okapi BM25 length-normalization over the whole multi-thousand-char blob."""
+    if not text:
+        return []
+    chunks = []
+    step = max(1, size - overlap)
+    i, n = 0, len(text)
+    while i < n:
+        chunks.append(text[i:i + size])
+        i += step
+    return chunks
+
 def build_bm25_index():
-    global BM25_INDEX, BM25_UIDS
+    global BM25_INDEX, BM25_UIDS, BM25_CHUNK_PARENTS, BM25_CHUNK_TEXTS
     if not CHAT_INDEX:
         return
     uids = [c['uid'] for c in CHAT_INDEX]
-    corpus = [tokenize(get_chat_text(uid)) for uid in uids]
+    corpus = []
+    chunk_parents = []
+    chunk_texts = []
+    for uid in uids:
+        for ch in chunk_text(get_chat_text(uid)):
+            toks = tokenize(ch)
+            if not toks:  # all-symbol chunk → skip (empty docs break BM25 scoring)
+                continue
+            corpus.append(toks)
+            chunk_parents.append(uid)
+            chunk_texts.append(ch)
+    if not corpus:
+        return
     with SEARCH_LOCK:
         BM25_INDEX = BM25Okapi(corpus)
         BM25_UIDS = uids
-    print(f'[BM25] Index built: {len(uids)} chats.')
+        BM25_CHUNK_PARENTS = chunk_parents
+        BM25_CHUNK_TEXTS = chunk_texts
+    print(f'[BM25] Index built: {len(uids)} chats / {len(corpus)} chunks.')
 
 def load_embed_index():
     global EMBED_INDEX
@@ -442,18 +485,69 @@ def cosine_sim(a, b):
         return 0.0
     return float(np.dot(a, b) / (norm_a * norm_b))
 
+def llm_rerank(query, candidates):
+    """Rerank top candidates by CONCEPTUAL relevance via the OpenAI API. Returns a reordered
+    candidate list, or None on failure (caller keeps original order). No-op without
+    OPENAI_API_KEY, so the feature is fully optional."""
+    if not OPENAI_API_KEY or len(candidates) < 2:
+        return None
+    items = []
+    for i, c in enumerate(candidates):
+        # Judge on the MATCHED chunk (snippet), not the whole-chat summary — the summary
+        # reflects a long chat's dominant topic and poisons ranking for buried-topic matches.
+        ctx = (c.get('snippet') or c.get('summary') or '')[:600]
+        items.append(f"[{i}] {ctx}")
+    prompt = (
+        "You are a search reranker. Given the user QUERY and a list of conversation snippets "
+        "(each with an index), order the indices from MOST to LEAST relevant to the query's "
+        "intent. Prioritize relevance of CONCEPT/topic, not keyword overlap. "
+        'Reply with JSON only: {"order": [indices, most relevant first]}.\n\n'
+        f"QUERY: {query}\n\nSNIPPETS:\n" + "\n".join(items)
+    )
+    try:
+        r = requests.post(
+            'https://api.openai.com/v1/chat/completions',
+            headers={'Authorization': f'Bearer {OPENAI_API_KEY}'},
+            json={'model': RERANK_MODEL,
+                  'messages': [{'role': 'user', 'content': prompt}],
+                  'temperature': 0,
+                  'response_format': {'type': 'json_object'}},
+            timeout=20,
+        )
+        order = json.loads(r.json()['choices'][0]['message']['content']).get('order', [])
+        seen, result = set(), []
+        for idx in order:
+            if isinstance(idx, int) and 0 <= idx < len(candidates) and idx not in seen:
+                seen.add(idx); result.append(candidates[idx])
+        for i in range(len(candidates)):  # append any the model dropped, preserving order
+            if i not in seen:
+                result.append(candidates[i])
+        return result
+    except Exception as e:
+        print(f'[Rerank] error: {e}', flush=True)
+        return None
+
 def hybrid_search(query, top_k=30):
-    """RRF fusion of BM25 + semantic embeddings."""
+    """RRF fusion of BM25 + semantic embeddings, with optional LLM reranking."""
     query_terms = tokenize(query)
     rrf_scores = {}
     K = 60  # RRF constant
 
-    # BM25 ranking
-    if BM25_INDEX and BM25_UIDS:
+    # BM25 ranking (chunk-level → collapse to best chunk per chat)
+    best_chunk_text = {}  # uid -> raw text of its highest-scoring chunk (for snippet/rerank)
+    if BM25_INDEX and BM25_CHUNK_PARENTS:
         with SEARCH_LOCK:
             scores = BM25_INDEX.get_scores(query_terms)
-            uids_snapshot = BM25_UIDS[:]
-        bm25_ranked = sorted(zip(uids_snapshot, scores), key=lambda x: x[1], reverse=True)
+            parents_snapshot = BM25_CHUNK_PARENTS[:]
+            texts_snapshot = BM25_CHUNK_TEXTS[:]
+        parent_best = {}
+        for chunk_i, score in enumerate(scores):
+            uid = parents_snapshot[chunk_i]
+            if score > parent_best.get(uid, 0):
+                parent_best[uid] = score
+                if chunk_i < len(texts_snapshot):
+                    best_chunk_text[uid] = texts_snapshot[chunk_i]
+        bm25_ranked = sorted(parent_best.items(), key=lambda x: x[1], reverse=True)
         for rank, (uid, score) in enumerate(bm25_ranked):
             if score > 0:
                 rrf_scores[uid] = rrf_scores.get(uid, 0) + 1.0 / (rank + K)
@@ -477,8 +571,10 @@ def hybrid_search(query, top_k=30):
         chat = chat_map.get(uid)
         if not chat:
             continue
-        text = get_chat_text(uid)
-        snippet = get_snippet(text, query_terms)
+        if uid in best_chunk_text:  # snippet from the best-matching chunk (dense relevant part)
+            snippet = get_snippet(best_chunk_text[uid], query_terms)
+        else:
+            snippet = get_snippet(get_chat_text(uid), query_terms)
         output.append({
             'uid': uid,
             'sid': chat.get('sid', ''),
@@ -490,6 +586,12 @@ def hybrid_search(query, top_k=30):
             'skill': chat.get('skill'),
             'summary': chat.get('summary', ''),
         })
+
+    # Optional LLM rerank of the top candidates by conceptual relevance (no-op without key)
+    if OPENAI_API_KEY and len(output) > 1:
+        reranked = llm_rerank(query, output[:RERANK_TOP])
+        if reranked:
+            output = reranked + output[RERANK_TOP:]
     return output
 
 # ─── INDEX WORKER ────────────────────────────────────────────────────────────
@@ -709,12 +811,14 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                     self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
             elif self.path == '/api/search/status':
                 status = {
-                    'bm25_ready': BM25_INDEX is not None,
+                    'bm25_ready': BM25_INDEX is not None and len(BM25_CHUNK_PARENTS) > 0,
                     'bm25_count': len(BM25_UIDS),
+                    'chunk_count': len(BM25_CHUNK_PARENTS),
                     'embed_ready': len(EMBED_INDEX) > 0,
                     'embed_count': len(EMBED_INDEX),
                     'total_chats': len(CHAT_INDEX),
                     'embed_provider': 'gemini' if GEMINI_API_KEY else 'none',
+                    'rerank': RERANK_MODEL if OPENAI_API_KEY else 'off',
                 }
                 self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
                 self.wfile.write(json.dumps(status).encode('utf-8'))
@@ -781,7 +885,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cockpit v6.2</title>
+    <title>Cockpit v7.1</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
@@ -1210,7 +1314,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
         <!-- SIDEBAR -->
         <div class="col-md-3 sidebar">
             <div class="sidebar-header">
-                <h6>COCKPIT v6.2</h6>
+                <h6>COCKPIT v7.1</h6>
                 <div class="d-flex gap-2" style="margin-bottom:4px;">
                     <button class="header-btn" onclick="showDNA()" title="Memory Profile"><i class="bi bi-clipboard2-pulse"></i></button>
                     <button class="header-btn" onclick="showDailyAudit()" title="Daily Audit"><i class="bi bi-journal-text"></i></button>
@@ -1259,7 +1363,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
             </div>
             <div class="messages-scroll" id="chat-display">
                 <div id="welcome-msg" class="welcome">
-                    <div class="text-center"><h1>COCKPIT</h1><p>The Elder's Panopticon v6.2</p></div>
+                    <div class="text-center"><h1>COCKPIT</h1><p>The Elder's Panopticon v7.1</p></div>
                 </div>
                 <div id="loading-overlay" style="display:none;" class="loading-box">
                     <div class="spinner-border text-primary"></div>
@@ -1609,7 +1713,7 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
 .hdr h2{font-size:1rem;color:#8899aa;font-weight:600;margin:0;letter-spacing:1px;}
 .hdr small{color:#3a4a5a;font-size:0.7rem;}</style></head>
 <body><div class="hdr"><h2>${src.toUpperCase()} SESSION${skillLabel}</h2><small>${date} &mdash; ${currentChat.msgs.length} mensagens</small></div>${msgs}
-<div style="text-align:center;padding:24px;color:#6a7a8a;font-size:0.65rem;border-top:1px solid #1e2a3a;margin-top:24px;">Exported from Cockpit v6.2</div></body></html>`;
+<div style="text-align:center;padding:24px;color:#6a7a8a;font-size:0.65rem;border-top:1px solid #1e2a3a;margin-top:24px;">Exported from Cockpit v7.1</div></body></html>`;
 
             const blob = new Blob([html], {type: 'text/html'});
             const a = document.createElement('a');
