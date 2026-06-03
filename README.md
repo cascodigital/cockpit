@@ -19,7 +19,7 @@ CLI assistants scatter `.jsonl` files across `~/.claude/`, `~/.codex/`, `~/.gemi
 
 | Feature | Description |
 |---------|-------------|
-| **Hybrid Search** | BM25 keyword + optional Gemini embeddings, fused via Reciprocal Rank Fusion |
+| **Hybrid Search** | Chunk-level BM25 (accent-insensitive) + optional Gemini embeddings, fused via Reciprocal Rank Fusion, with optional LLM reranking |
 | **Daily Audit** | LLM-generated structured JSON: headline, narrative, behavioral patterns, focus score |
 | **Weekly Digest** | Cross-cutting analysis over the last 7 daily audits |
 | **Memory Profile** | Long-term distillation of recurring themes, blockers, and open threads |
@@ -134,10 +134,13 @@ All config via env vars. See [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) fo
 | `PORT` | `8000` | HTTP listen port |
 | `DEEPSEEK_API_KEY` | — | Primary LLM for audits (cheap, JSON-mode reliable) |
 | `GEMINI_API_KEY` | — | Fallback LLM + embeddings for semantic search |
+| `OPENAI_API_KEY` | — | Optional: enables LLM reranking of search results |
+| `RERANK_MODEL` | `gpt-4o-mini` | OpenAI model used for reranking |
+| `RERANK_TOP` | `30` | How many top candidates to rerank per query |
 | `TZ` | `UTC` | Affects daily audit date boundaries |
 | `MEMORY_KEYWORDS` | (empty) | Comma-separated filter for the memory distiller |
 
-At least one of `DEEPSEEK_API_KEY` / `GEMINI_API_KEY` is required. Without `GEMINI_API_KEY`, semantic search degrades to BM25-only — still very usable.
+At least one of `DEEPSEEK_API_KEY` / `GEMINI_API_KEY` is required. Without `GEMINI_API_KEY`, semantic search degrades to BM25-only — still very usable. Reranking is fully optional: without `OPENAI_API_KEY` the search returns the RRF-fused order unchanged.
 
 ## API
 
@@ -156,8 +159,9 @@ At least one of `DEEPSEEK_API_KEY` / `GEMINI_API_KEY` is required. Without `GEMI
 ## Stack
 
 - **Python 3.11** stdlib HTTP server (no Flask/FastAPI dependency)
-- **rank-bm25** + **numpy** for keyword search
+- **rank-bm25** + **numpy** for chunk-level keyword search
 - **Google Gemini** embeddings (optional) for semantic search
+- **OpenAI** (optional) for LLM reranking of search results
 - **DeepSeek** (primary) + **Gemini** (fallback) for daily audits and memory distillation
 - **Docker Compose** deployment
 - **Bash + rsync** for client-side syncing (no agent on clients)

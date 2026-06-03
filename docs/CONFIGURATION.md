@@ -14,9 +14,17 @@ All runtime knobs are environment variables. The full set:
 | `CODEX_DATA` | `/app/data/codex` | Where to find Codex `.jsonl` logs |
 | `DEEPSEEK_API_KEY` | — | Primary LLM for audits/digests. Cheap, JSON-mode reliable |
 | `GEMINI_API_KEY` | — | Fallback LLM, AND the embeddings provider for semantic search |
+| `OPENAI_API_KEY` | — | Optional. Enables LLM reranking of search results |
+| `RERANK_MODEL` | `gpt-4o-mini` | OpenAI model used for reranking |
+| `RERANK_TOP` | `30` | Number of top candidates reranked per query |
 
 You need at least one of `DEEPSEEK_API_KEY` / `GEMINI_API_KEY`. Without
 `GEMINI_API_KEY`, semantic search degrades to BM25-only.
+
+Reranking is optional. Without `OPENAI_API_KEY`, `/api/search` returns the
+RRF-fused order unchanged. When set, the top `RERANK_TOP` candidates are
+reordered by an LLM judging conceptual relevance against the matched snippet
+(not the whole-chat summary, which would bias long mixed-topic chats).
 
 ## Memory distiller (`app/memory_distiller.py`)
 
