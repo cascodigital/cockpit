@@ -37,7 +37,7 @@ CLAUDE_CONVERTED_DIR = os.environ.get('CLAUDE_CONVERTED', '/app/data/claude_conv
 CODEX_BASE_DIR = os.environ.get('CODEX_DATA', '/app/data/codex')
 CHATGPT_SITE_DIR = os.environ.get('CHATGPT_SITE_DATA', '/app/data/chatgpt_site')
 DATA_DIR = '/app/data'
-APP_VERSION = '7.1'
+APP_VERSION = '7.2'
 SKILL_LOG_PATH = os.path.join(DATA_DIR, 'skill_log.jsonl')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')  # optional: enables LLM reranking
 RERANK_MODEL = os.environ.get('RERANK_MODEL', 'gpt-4o-mini')  # OpenAI model for reranking
@@ -47,24 +47,28 @@ EMBED_DISABLED = False  # set True on first API failure
 EMBED_RUNNING = False  # prevent concurrent embed threads
 SEARCH_INDEX_PATH = os.path.join(DATA_DIR, 'search_index.json')
 
+# Keep in sync with the skills that actually exist on disk (~/.claude/skills).
+# Stale entries here show wrong/empty badges in the sidebar and a dead option in
+# the skill filter. Last reconciled 2026-06-18.
 SKILLS_MAP = {
-    'skippy':      {'icon': '🍺', 'name': 'Skippy'},
     'skacoes':     {'icon': '📈', 'name': 'Trading'},
     'skadv':       {'icon': '⚖️', 'name': 'Advogado'},
     'skcnpj':      {'icon': '🤝', 'name': 'Saul'},
-    'skcpf':       {'icon': '🧅', 'name': 'Architect'},
+    'skcoz':       {'icon': '🍳', 'name': 'Cozinha'},
+    'skcpf':       {'icon': '💼', 'name': 'Carreira'},
     'skcreator':   {'icon': '🏗️', 'name': 'Creator'},
     'skeng':       {'icon': '🇬🇧', 'name': 'English'},
     'skhumanizer': {'icon': '✍️', 'name': 'Humanizer'},
+    'skippy':      {'icon': '🍺', 'name': 'Skippy'},
     'skmcp':       {'icon': '🔌', 'name': 'MCP'},
     'skmed':       {'icon': '💊', 'name': 'Hans'},
-    'skmimi':      {'icon': '🐢', 'name': 'Mimi'},
     'skprompt':    {'icon': '✨', 'name': 'Prompt'},
     'skpsi':       {'icon': '🧬', 'name': 'Skippy Psi'},
     'skrelatorio': {'icon': '📊', 'name': 'Relatorio'},
     'skresume':    {'icon': '🧾', 'name': 'Resume'},
     'skrolo':      {'icon': '🎵', 'name': 'Rolo'},
     'sksup':       {'icon': '🎫', 'name': 'Suporte'},
+    'sktkt':       {'icon': '🎟️', 'name': 'Jira'},
     'skvet':       {'icon': '🐱', 'name': 'Chico'},
 }
 
@@ -581,6 +585,7 @@ def hybrid_search(query, top_k=30):
             'score': round(score, 6),
             'snippet': snippet,
             'date': chat.get('date', ''),
+            'raw_date': chat.get('raw_date', 0),  # sortable ts → lets the UI re-sort by recency
             'source': chat.get('source', ''),
             'machine': chat.get('machine', ''),
             'skill': chat.get('skill'),
@@ -885,7 +890,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cockpit v7.1</title>
+    <title>Cockpit v7.2</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
@@ -979,6 +984,22 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
         .search-mode-badge.show { display: flex; }
         .search-mode-badge.mode-semantic { background: rgba(168,85,247,0.15); color: var(--accent-purple); border: 1px solid rgba(168,85,247,0.3); }
         .search-mode-badge.mode-filter { background: rgba(59,130,246,0.1); color: var(--accent-blue); border: 1px solid rgba(59,130,246,0.2); }
+        .sort-toggle { display: none; align-items: center; gap: 4px; margin-top: 6px; }
+        .sort-toggle.show { display: flex; }
+        .sort-label { font-size: 0.6rem; color: var(--text-muted); margin-right: 2px; }
+        .sort-btn {
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            font-size: 0.62rem;
+            font-weight: 600;
+            padding: 3px 8px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .sort-btn:hover { color: var(--text-primary); border-color: var(--accent-blue); }
+        .sort-btn.active { background: rgba(59,130,246,0.15); color: var(--accent-blue); border-color: var(--accent-blue); }
         .filter-row { display: flex; gap: 4px; margin-top: 8px; }
         .filter-grid { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
         .filter-btn {
@@ -1314,7 +1335,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
         <!-- SIDEBAR -->
         <div class="col-md-3 sidebar">
             <div class="sidebar-header">
-                <h6>COCKPIT v7.1</h6>
+                <h6>COCKPIT v7.2</h6>
                 <div class="d-flex gap-2" style="margin-bottom:4px;">
                     <button class="header-btn" onclick="showDNA()" title="Memory Profile"><i class="bi bi-clipboard2-pulse"></i></button>
                     <button class="header-btn" onclick="showDailyAudit()" title="Daily Audit"><i class="bi bi-journal-text"></i></button>
@@ -1329,6 +1350,11 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                 <div class="search-mode-badge" id="mode-badge">
                     <i class="bi bi-stars"></i> <span id="mode-label"></span>
                     <span style="margin-left:auto;cursor:pointer;opacity:0.6;" onclick="clearSearch()">✕</span>
+                </div>
+                <div class="sort-toggle" id="sort-toggle">
+                    <span class="sort-label">Ordenar:</span>
+                    <button class="sort-btn active" id="sort-recent" onclick="setSort('recent')">🕒 Recentes</button>
+                    <button class="sort-btn" id="sort-relevance" onclick="setSort('relevance')">✨ Relevância</button>
                 </div>
                 <div class="filter-row">
                     <button class="filter-btn filter-btn-all active" data-filter="all" onclick="setFilter('src','all',this)">Todas</button>
@@ -1363,7 +1389,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
             </div>
             <div class="messages-scroll" id="chat-display">
                 <div id="welcome-msg" class="welcome">
-                    <div class="text-center"><h1>COCKPIT</h1><p>The Elder's Panopticon v7.1</p></div>
+                    <div class="text-center"><h1>COCKPIT</h1><p>The Elder's Panopticon v7.2</p></div>
                 </div>
                 <div id="loading-overlay" style="display:none;" class="loading-box">
                     <div class="spinner-border text-primary"></div>
@@ -1407,6 +1433,29 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
         let semanticResults = null;
         let searchDebounce = null;
         let searchToken = 0;
+        let sortMode = 'recent'; // 'recent' (default) | 'relevance' — applies to deep-search results
+        let lastDeepQuery = '';
+
+        // Recency by default: most people want the last few days of a topic, not the
+        // single most "relevant" hit. Relevance (server RRF + LLM rerank order) stays
+        // one click away.
+        function sortResults(list) {
+            if (sortMode === 'recent') {
+                return [...list].sort((a, b) => (b.raw_date || 0) - (a.raw_date || 0));
+            }
+            return list; // 'relevance' = server order, untouched
+        }
+
+        function setSort(mode) {
+            sortMode = mode;
+            document.getElementById('sort-recent').classList.toggle('active', mode === 'recent');
+            document.getElementById('sort-relevance').classList.toggle('active', mode === 'relevance');
+            if (semanticResults) renderList(sortResults(semanticResults), lastDeepQuery);
+        }
+
+        function showSortToggle(show) {
+            document.getElementById('sort-toggle').classList.toggle('show', show);
+        }
         const meta = {{META_JSON}};
 
         async function load() {
@@ -1426,9 +1475,11 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
         function resetSearchMode() {
             searchMode = 'filter';
             semanticResults = null;
+            lastDeepQuery = '';
             document.getElementById('search-box').classList.remove('semantic-active');
             document.getElementById('mode-badge').className = 'search-mode-badge';
             document.getElementById('sem-btn').classList.remove('active');
+            showSortToggle(false);
         }
 
         function setModeBadge(modeClass, label) {
@@ -1463,8 +1514,10 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                 if (startedToken !== searchToken) return results;
 
                 semanticResults = results;
+                lastDeepQuery = query;
                 setModeBadge('mode-semantic', `${auto ? 'Busca profunda' : 'Semântico'} — ${results.length} resultados`);
-                renderList(results, query);
+                showSortToggle(results.length > 1);
+                renderList(sortResults(results), query);
                 return results;
             } catch(e) {
                 if (startedToken === searchToken) {
@@ -1713,7 +1766,7 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
 .hdr h2{font-size:1rem;color:#8899aa;font-weight:600;margin:0;letter-spacing:1px;}
 .hdr small{color:#3a4a5a;font-size:0.7rem;}</style></head>
 <body><div class="hdr"><h2>${src.toUpperCase()} SESSION${skillLabel}</h2><small>${date} &mdash; ${currentChat.msgs.length} mensagens</small></div>${msgs}
-<div style="text-align:center;padding:24px;color:#6a7a8a;font-size:0.65rem;border-top:1px solid #1e2a3a;margin-top:24px;">Exported from Cockpit v7.1</div></body></html>`;
+<div style="text-align:center;padding:24px;color:#6a7a8a;font-size:0.65rem;border-top:1px solid #1e2a3a;margin-top:24px;">Exported from Cockpit v7.2</div></body></html>`;
 
             const blob = new Blob([html], {type: 'text/html'});
             const a = document.createElement('a');
