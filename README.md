@@ -1,11 +1,20 @@
+<div align="center">
+
 # Cockpit — Forensic UI for AI Chat Sessions
 
-![Status](https://img.shields.io/badge/Status-Active-brightgreen)
-![License](https://img.shields.io/badge/License-MIT-blue)
+**Self-hosted search, audit, and memory UI for local AI assistant sessions.**
+
+![Status](https://img.shields.io/badge/Status-Active-16A34A?style=flat-square)
+![License](https://img.shields.io/badge/License-MIT-2563EB?style=flat-square)
+![Casco Digital](https://img.shields.io/badge/Casco-Digital-111827?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&logo=docker&logoColor=white)
 ![DeepSeek](https://img.shields.io/badge/DeepSeek-API-4D6BFE?style=flat-square)
 ![Gemini](https://img.shields.io/badge/Gemini-Embeddings-8E75B2?style=flat-square&logo=googlegemini&logoColor=white)
+
+</div>
+
+---
 
 Self-hosted forensic UI that indexes [Claude Code](https://docs.claude.com/en/docs/claude-code), [Codex CLI](https://github.com/openai/codex), and [Gemini CLI](https://github.com/google-gemini/gemini-cli) sessions across every machine you use. Hybrid search (BM25 + embeddings), daily LLM-generated audits with behavioral patterns, and a memory profile distilled from recurring themes — all in one dashboard you control.
 
