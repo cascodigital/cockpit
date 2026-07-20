@@ -22,8 +22,12 @@ services:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       RERANK_MODEL: ${RERANK_MODEL:-gpt-4o-mini}
       RERANK_TOP: ${RERANK_TOP:-30}
+      ASK_MODEL: ${ASK_MODEL:-gpt-4o-mini}
+      ASK_CHAR_BUDGET: ${ASK_CHAR_BUDGET:-90000}
+      ASK_RECENT_DAYS: ${ASK_RECENT_DAYS:-5}
       MEMORY_SKILL: ${MEMORY_SKILL:-}
       PYTHONUNBUFFERED: "1"
     command: python cockpit.py
