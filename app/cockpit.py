@@ -39,9 +39,15 @@ CHATGPT_SITE_DIR = os.environ.get('CHATGPT_SITE_DATA', '/app/data/chatgpt_site')
 DATA_DIR = '/app/data'
 APP_VERSION = '7.2'
 SKILL_LOG_PATH = os.path.join(DATA_DIR, 'skill_log.jsonl')
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')  # optional: enables LLM reranking
-RERANK_MODEL = os.environ.get('RERANK_MODEL', 'gpt-4o-mini')  # OpenAI model for reranking
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')  # optional: enables LLM rerank + /api/ask
+# Any OpenAI-compatible server works (Ollama, LM Studio, vLLM...). Local servers need no key.
+OPENAI_BASE_URL = (os.environ.get('OPENAI_BASE_URL', '') or 'https://api.openai.com/v1').rstrip('/')
+OPENAI_ENABLED = bool(OPENAI_API_KEY or os.environ.get('OPENAI_BASE_URL'))
+RERANK_MODEL = os.environ.get('RERANK_MODEL', 'gpt-4o-mini')  # model for search reranking
 RERANK_TOP = int(os.environ.get('RERANK_TOP', '30'))  # how many candidates to rerank
+ASK_MODEL = os.environ.get('ASK_MODEL', 'gpt-4o-mini')  # model for /api/ask answers
+ASK_CHAR_BUDGET = int(os.environ.get('ASK_CHAR_BUDGET', '90000'))  # journal context cap (~27k tokens)
+ASK_RECENT_DAYS = int(os.environ.get('ASK_RECENT_DAYS', '5'))  # recent days always in /api/ask context
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 EMBED_DISABLED = False  # set True on first API failure
 EMBED_RUNNING = False  # prevent concurrent embed threads
@@ -491,10 +497,10 @@ def cosine_sim(a, b):
     return float(np.dot(a, b) / (norm_a * norm_b))
 
 def llm_rerank(query, candidates):
-    """Rerank top candidates by CONCEPTUAL relevance via the OpenAI API. Returns a reordered
-    candidate list, or None on failure (caller keeps original order). No-op without
-    OPENAI_API_KEY, so the feature is fully optional."""
-    if not OPENAI_API_KEY or len(candidates) < 2:
+    """Rerank top candidates by CONCEPTUAL relevance via an OpenAI-compatible API. Returns
+    a reordered candidate list, or None on failure (caller keeps original order). No-op
+    without an LLM configured, so the feature is fully optional."""
+    if not OPENAI_ENABLED or len(candidates) < 2:
         return None
     items = []
     for i, c in enumerate(candidates):
@@ -511,8 +517,8 @@ def llm_rerank(query, candidates):
     )
     try:
         r = requests.post(
-            'https://api.openai.com/v1/chat/completions',
-            headers={'Authorization': f'Bearer {OPENAI_API_KEY}'},
+            f'{OPENAI_BASE_URL}/chat/completions',
+            headers={'Authorization': f'Bearer {OPENAI_API_KEY}'} if OPENAI_API_KEY else {},
             json={'model': RERANK_MODEL,
                   'messages': [{'role': 'user', 'content': prompt}],
                   'temperature': 0,
@@ -571,6 +577,64 @@ def search_journal(query, limit=8):
                 hits.append({'score': score, 'date': day['date'], 'section': section, 'text': text})
     hits.sort(key=lambda h: (h['score'], h['date']), reverse=True)
     return [{'date': h['date'], 'section': h['section'], 'text': h['text']} for h in hits[:limit]]
+
+def ask_panopticon(question):
+    """Answer a natural-language question using the journal as context (LLM required).
+    RAG-lite selection: the ASK_RECENT_DAYS newest days always enter; older days enter
+    only if they match the question's terms (distinct-term score, same criterion as
+    search_journal). Budget priority: recent first, then matches by score. Scales to
+    years of journal without blowing the context window or diluting attention."""
+    if not OPENAI_ENABLED:
+        return {'error': 'no LLM configured - set OPENAI_API_KEY or OPENAI_BASE_URL'}
+    days = list_journal()  # newest first
+    if not days:
+        return {'error': 'journal empty or unreachable (BRAIN_DATA)'}
+    terms = [t for t in tokenize(question) if len(t) >= 3]
+    need = max(1, len(terms) // 3)
+    recent = days[:ASK_RECENT_DAYS]
+    matched = []
+    for day in days[ASK_RECENT_DAYS:]:
+        dtoks = ' '.join(tokenize(day['content']))
+        score = sum(1 for t in terms if t in dtoks)
+        if score >= need:
+            matched.append((score, day))
+    matched.sort(key=lambda x: (x[0], x[1]['date']), reverse=True)
+    picked, total = {}, 0
+    for day in recent + [d for _, d in matched]:  # order = budget priority
+        block = f"### {day['date']}\n{day['content'].strip()}"
+        if total + len(block) > ASK_CHAR_BUDGET and picked:
+            continue  # day didn't fit; smaller later days may still fit
+        picked[day['date']] = block
+        total += len(block)
+    used_dates = sorted(picked, reverse=True)
+    ctx_parts = [picked[d] for d in used_dates]  # prompt always chronological (newest first)
+    system = (
+        "You are the Panopticon, the user's distilled long-term memory (a daily journal). "
+        "Answer the question using ONLY the journal below. Rules: "
+        "1) Always cite the date(s) (YYYY-MM-DD) of the entries that support the answer. "
+        "2) The journal is ordered newest to oldest; when days conflict, the most recent wins. "
+        "3) Struck-through items (~~text~~) are OUTDATED - ignore their content, but you may say they were revoked. "
+        "4) If the journal does not cover the question, say so clearly instead of inventing. "
+        "5) The context holds only recent days plus days relevant to the question; date gaps "
+        "are normal - a missing day does not mean nothing happened. "
+        "Answer in the language of the question, direct, in markdown."
+    )
+    try:
+        r = requests.post(
+            f'{OPENAI_BASE_URL}/chat/completions',
+            headers={'Authorization': f'Bearer {OPENAI_API_KEY}'} if OPENAI_API_KEY else {},
+            json={'model': ASK_MODEL,
+                  'messages': [{'role': 'system', 'content': system},
+                               {'role': 'user', 'content': "JOURNAL:\n\n" + "\n\n".join(ctx_parts)
+                                + f"\n\nQUESTION: {question}"}],
+                  'temperature': 0.2},
+            timeout=120,
+        )
+        answer = r.json()['choices'][0]['message']['content']
+        return {'answer': answer, 'sources': used_dates, 'model': ASK_MODEL}
+    except Exception as e:
+        print(f'[Ask] error: {e}', flush=True)
+        return {'error': str(e)}
 
 def hybrid_search(query, top_k=30):
     """RRF fusion of BM25 + semantic embeddings, with optional LLM reranking."""
@@ -914,6 +978,22 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps(payload).encode('utf-8'))
 
+            elif self.path == '/api/ask':
+                # Ask the Panopticon: journal as context, LLM answers with cited dates
+                content_length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(content_length).decode('utf-8')
+                data = json.loads(body)
+                question = data.get('question', '').strip()
+                if not question:
+                    self.send_response(400); self.end_headers(); self.wfile.write(b'{"error": "no question"}')
+                    return
+                result = ask_panopticon(question)
+                self.send_response(200 if 'answer' in result else 500)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps(result, ensure_ascii=False).encode('utf-8'))
+
             else:
                 self.send_error(404)
         except Exception as e:
@@ -928,7 +1008,9 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
 
     def generate_html(self):
         opts = ''.join([f'<option value="{k}">{v["icon"]} {v["name"]}</option>' for k, v in SKILLS_MAP.items()])
-        return self.get_template().replace('{{OPTS}}', opts).replace('{{META_JSON}}', json.dumps(SKILLS_MAP))
+        return (self.get_template().replace('{{OPTS}}', opts)
+                .replace('{{META_JSON}}', json.dumps(SKILLS_MAP))
+                .replace('{{ASK_ENABLED}}', 'true' if OPENAI_ENABLED else 'false'))
 
     def get_template(self):
         return """<!DOCTYPE html>
@@ -1391,6 +1473,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                     <button class="search-btn" id="sem-btn" onclick="doSemanticSearch()" title="Busca semântica por significado">
                         <i class="bi bi-stars"></i>
                     </button>
+                    <button class="search-btn" id="ask-btn" onclick="askPanopticon()" title="Pergunte ao Panopticon — resposta via journal (Ctrl+Enter)">🔮</button>
                 </div>
                 <div class="search-mode-badge" id="mode-badge">
                     <i class="bi bi-stars"></i> <span id="mode-label"></span>
@@ -1501,6 +1584,8 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
             document.getElementById('sort-toggle').classList.toggle('show', show);
         }
         const meta = {{META_JSON}};
+        const askEnabled = {{ASK_ENABLED}};
+        if (!askEnabled) document.getElementById('ask-btn').style.display = 'none';
 
         async function load() {
             try { const r = await fetch('/api/chats'); index = await r.json(); apply(); }
@@ -1689,10 +1774,57 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
             apply();
         }
 
+        // ── ASK PANOPTICON ───────────────────────────────────────────────────
+
+        async function askPanopticon() {
+            const q = document.getElementById('search-box').value.trim();
+            if (!q) { toast('Digite uma pergunta primeiro'); return; }
+            const btn = document.getElementById('ask-btn');
+            btn.innerHTML = '<div class="spinner-border spinner-border-sm" style="width:14px;height:14px;border-width:2px;"></div>';
+            btn.disabled = true;
+            setModeBadge('mode-semantic', 'Perguntando ao Panopticon...');
+            try {
+                const r = await fetch('/api/ask', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({question: q})
+                });
+                const data = await r.json();
+                if (data.error) { toast('Panopticon: ' + data.error); setModeBadge('mode-semantic', 'Panopticon falhou'); return; }
+                showAskPanel(q, data);
+                setModeBadge('mode-semantic', 'Panopticon respondeu');
+            } catch(e) {
+                console.error(e);
+                toast('Erro ao consultar o Panopticon');
+            } finally {
+                btn.innerHTML = '\\u{1F52E}';
+                btn.disabled = false;
+            }
+        }
+
+        function showAskPanel(question, data) {
+            const welcome = document.getElementById('welcome-msg');
+            const container = document.getElementById('messages-container');
+            welcome.style.display = 'none';
+            currentChat = null;
+            const n = (data.sources || []).length;
+            const range = n ? data.sources[n-1] + ' \\u2192 ' + data.sources[0] : '';
+            container.innerHTML = '<div style="max-width:900px;margin:24px auto;padding:0 16px;">'
+                + '<div style="border:1px solid rgba(34,197,94,0.45);background:rgba(34,197,94,0.05);border-radius:12px;padding:20px 24px;">'
+                + '<div style="color:#4ade80;font-size:0.8rem;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px;">\\u{1F52E} Panopticon</div>'
+                + '<div style="color:var(--text-muted);font-size:0.82rem;margin-bottom:14px;border-left:3px solid #22c55e;padding-left:10px;">' + escapeHtml(question) + '</div>'
+                + '<div style="font-size:0.92rem;line-height:1.6;">' + marked.parse(data.answer || '') + '</div>'
+                + '<div style="color:var(--text-muted);font-size:0.72rem;margin-top:10px;">Contexto: journal ' + range + ' (' + n + ' dias) \\u00B7 ' + (data.model || '') + ' \\u00B7 resposta gerada, confira as datas citadas</div>'
+                + '</div></div>';
+            document.getElementById('chat-display').scrollTop = 0;
+        }
+
         // ── EVENTS ───────────────────────────────────────────────────────────
 
         document.getElementById('search-box').addEventListener('keydown', function(e) {
-            if (e.key === 'Enter') {
+            if (e.key === 'Enter' && (e.ctrlKey || e.shiftKey) && askEnabled) {
+                askPanopticon();  // Ctrl/Shift+Enter = ask the journal
+            } else if (e.key === 'Enter') {
                 doSemanticSearch();
             } else if (e.key === 'Escape') {
                 clearSearch();
