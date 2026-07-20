@@ -127,24 +127,76 @@ def generate_daily_audit():
                 content = " ".join([str(p.get("text", "")) for p in content if isinstance(p, dict)])
             full_text += f"{role.upper()}: {content[:600]}\n"
 
+    # Recent audits go into the prompt so the model can avoid repeating itself
+    # (same headline/insight day after day) and judge deltas instead.
+    recent_context = "[]"
+    if os.path.exists(OUTPUT_FILE):
+        try:
+            with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
+                history = json.load(f)
+            recent_items = []
+            for entry in history[:10]:
+                if entry.get("date") == today_str:
+                    continue
+                recent_items.append({
+                    "date": entry.get("date"),
+                    "headline": entry.get("headline"),
+                    "pattern_insight": entry.get("pattern_insight"),
+                    "elder_verdict": entry.get("elder_verdict"),
+                    "day_metrics": entry.get("day_metrics", {}),
+                    "workstreams": entry.get("workstreams", []),
+                })
+            recent_context = json.dumps(recent_items[:7], ensure_ascii=False, indent=2)
+        except Exception:
+            recent_context = "[]"
+
     prompt_text = (
         f"Você é um auditor técnico com voz forte, humor seco e boa percepção comportamental. "
-        f"Sua tarefa: auditar o dia DELE com base nos logs de IA abaixo, sem virar inventário burocrático.\n\n"
+        f"Sua tarefa: produzir um Daily Ops Brief útil do dia DELE com base nos logs de IA abaixo. "
+        f"O objetivo é separar trabalho paralelo legítimo de ruído real. Não transforme volume de atividade em sermão psicológico.\n\n"
         f"LOGS DE HOJE:\n{full_text[:40000]}\n\n"
+        f"HISTÓRICO RECENTE PARA CONTROLE DE REPETIÇÃO (não copie; use para não virar papagaio):\n"
+        f"{recent_context[:16000]}\n\n"
         f"REGRAS DE TOM:\n"
         f"- Use uma voz confiante, precisa e levemente ácida, sem bordões repetidos.\n"
-        f"- Não seja bajulador. Seja tecnicamente correto e útil.\n"
-        f"- O valor não é 'o que ele fez' (git log faz isso). É 'o que isso revela sobre ele'.\n"
+        f"- Não seja bajulador. Seja tecnicamente correto e útil. Não seja professor de produtividade, coach ou relatório de RH.\n"
+        f"- O valor é explicar o arco operacional do dia: frentes tocadas, avanço real, bloqueios e próxima ação. "
+        f"Comportamento só entra quando houver evidência nova e específica.\n"
         f"- Cite tecnologias/erros/nomes REAIS que aparecem nos logs. Nada de genérico tipo 'trabalhou em código'.\n\n"
+        f"REGRAS ANTI-PAPAGAIO E ANTI-SERMÃO:\n"
+        f"- NÃO diga que o usuário 'troca muito de assunto' só porque trabalhou em várias frentes. Chame isso de workstreams paralelos.\n"
+        f"- 'context_switches' conta abandono improdutivo entre categorias, NÃO alternância normal entre frentes de trabalho.\n"
+        f"- Só use 'padrão comportamental' se houver evidência nova HOJE. Se o insight for igual aos últimos dias, escreva um delta: melhorou, piorou ou ficou neutro.\n"
+        f"- Se não houver evidência forte de loop/evitação, `pattern_insight` deve dizer que o paralelismo foi operacionalmente normal.\n"
+        f"- Evite repetir palavras como hiperfoco, procrastinação, caos, dispersão e fragmentação salvo quando o log provar o ponto.\n\n"
+        f"REGRAS DE EVIDÊNCIA:\n"
+        f"- Não invente pendências técnicas. Se os logs não provam problema de timezone, SMTP, Docker, path, API ou permissão, não mencione.\n"
+        f"- `next_action` deve vir de pendência real nos logs. Se tudo relevante fechou, use monitorar/validar a próxima execução concreta.\n"
+        f"- Em `workstreams[].status`, use APENAS: advanced, maintained, blocked, noise. "
+        f"advanced = concluído/resolvido com avanço real; maintained = rotina tratada; blocked = dependência externa; noise = falso alarme/loop.\n\n"
         f"FORMATO JSON ESTRITO (responda APENAS JSON puro, sem markdown, sem ```):\n"
         f"{{\n"
         f"  \"date\": \"{today_str}\",\n"
-        f"  \"hyperfocus\": \"Tema central do dia em 2-3 palavras (ex: 'Debug Cockpit', 'Caça bug Node-RED')\",\n"
-        f"  \"headline\": \"Manchete tipo crônica esportiva, 1 frase punchy. Ex: 'Passou 3h caçando uma vírgula e venceu a si mesmo.'\",\n"
-        f"  \"narrative\": \"Parágrafo único (4-7 frases) contando a HISTÓRIA do dia: o arco, o vilão (bug/problema), o momento de quase-desistência, a vitória ou derrota. Concreto, com nomes reais de tecnologia/erro que apareceram nos logs.\",\n"
-        f"  \"pattern_insight\": \"1-2 frases revelando um PADRÃO comportamental observado HOJE: trocou de contexto N vezes? Procrastinou em X e foi direto pro Y? Ficou fixado em detalhe irrelevante? Pediu pra IA decidir algo que ele devia decidir? Específico, não genérico.\",\n"
-        f"  \"fail_of_the_day\": \"O vacilo mais engraçado/educativo do dia em 1 frase. Pode ser técnico ou comportamental. Se não houve fail claro, ponha 'Surpreendentemente, nenhum colapso digno de registro.'\",\n"
-        f"  \"elder_verdict\": \"Sentença final em 1 frase: produtivo? perdido? evolução? regressão? Com julgamento, não diplomacia.\",\n"
+        f"  \"hyperfocus\": \"Tema operacional dominante em 2-4 palavras (ex: 'Debug Cockpit', 'n8n Cleanup')\",\n"
+        f"  \"headline\": \"Manchete curta de Daily Ops Brief, concreta e punchy. Não reciclar manchetes recentes.\",\n"
+        f"  \"narrative\": \"Parágrafo único (4-6 frases) contando o dia como operação: quais frentes existiram, onde houve avanço real, onde ficou bloqueado e qual foi o arco principal. Sem sermão repetido.\",\n"
+        f"  \"pattern_insight\": \"1-2 frases com DELTA comportamental ou operacional de hoje. Se não houver padrão novo, diga que o paralelismo foi normal e cite o único risco concreto, se existir.\",\n"
+        f"  \"fail_of_the_day\": \"Vacilo técnico/comportamental real em 1 frase. Se não houve fail claro, ponha 'Nenhum colapso digno de registro.'\",\n"
+        f"  \"elder_verdict\": \"Sentença final em 1 frase: produtividade real, pendência principal e próxima direção. Julgamento operacional, não moralismo.\",\n"
+        f"  \"ops_brief\": {{\n"
+        f"    \"line_of_day\": \"Resumo executivo em 1 frase, sem psicologizar.\",\n"
+        f"    \"advances\": [\"Avanço concreto 1\", \"Avanço concreto 2\"],\n"
+        f"    \"open_threads\": [\"Pendência concreta 1\"],\n"
+        f"    \"noise_detected\": [\"Ruído/loop real, se houver\"],\n"
+        f"    \"next_action\": \"Uma próxima ação recomendada, específica.\"\n"
+        f"  }},\n"
+        f"  \"workstreams\": [\n"
+        f"    {{\"name\": \"Cockpit/n8n\", \"category\": \"IA-Tooling\", \"status\": \"advanced\", \"evidence\": \"fato concreto dos logs\", \"next_step\": \"próximo passo curto\"}}\n"
+        f"  ],\n"
+        f"  \"repeat_control\": {{\n"
+        f"    \"reused_pattern\": false,\n"
+        f"    \"why\": \"Explique se o insight comportamental repete algo recente ou se é delta novo.\"\n"
+        f"  }},\n"
         f"  \"day_metrics\": {{\n"
         f"    \"context_switches\": 5,\n"
         f"    \"focus_score\": 4,\n"
@@ -173,10 +225,11 @@ def generate_daily_audit():
         f"- Aprendizado: estudo, pesquisa, tutorial, conceito novo\n\n"
         f"REGRAS DE MÉTRICAS:\n"
         f"- 'categories' por chat: 1 a 3 valores (a maioria 1).\n"
-        f"- 'context_switches': transições entre categorias DIFERENTES ao longo do dia.\n"
-        f"- 'focus_score': 0-10. 10=monofocado. 0=caos pulando entre 5+ áreas.\n"
+        f"- 'context_switches': estime só mudanças improdutivas ou abandono de uma frente por outra. Não penalize rotina multi-workstream.\n"
+        f"- 'focus_score': 0-10. 10=uma frente com avanço claro. 7-8=várias frentes com avanço. 4-6=muitas frentes com pendências. 0-3=loop sem avanço.\n"
         f"- 'dominant_category': categoria com mais chats no dia.\n\n"
-        f"OBRIGATÓRIO: TODAS as chaves presentes (inclusive day_metrics e categories em cada chat). 'chats' inclui TODOS os UIDs dos logs."
+        f"OBRIGATÓRIO: TODAS as chaves presentes (inclusive ops_brief, workstreams, repeat_control, day_metrics e categories em cada chat). "
+        f"'chats' inclui TODOS os UIDs dos logs."
     )
 
     try:
