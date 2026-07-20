@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import requests
 
 # Configurações
-DATA_DIR = "/app/data"
+DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 GEMINI_DIR = os.path.join(DATA_DIR, "gemini")
 CLAUDE_DIR = os.path.join(DATA_DIR, "claude_converted")
 CODEX_DIR = os.path.join(DATA_DIR, "codex")

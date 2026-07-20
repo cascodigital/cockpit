@@ -3,7 +3,7 @@ import json
 from datetime import datetime
 import requests
 
-DATA_DIR = "/app/data"
+DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 DAILY_FILE = os.path.join(DATA_DIR, "daily_audit.json")
 OUTPUT_FILE = os.path.join(DATA_DIR, "weekly_digest.json")
 
