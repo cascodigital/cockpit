@@ -2131,7 +2131,7 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                 html += '<div style="font-size:0.7rem;color:#6a7a8a;margin:-6px 0 16px;">Dynamic assistant context: long-term core plus recent working memory. Static identity/profile data stays separate.</div>';
                 html += '<div class="dna-section"><strong>📌 LONGO PRAZO &mdash; core (só muda por contradição)</strong>';
                 html += `<div style="font-size:0.9rem;margin-top:6px;">${coreMd ? marked.parse(coreMd) : '<em style="color:#6a7a8a;">Núcleo ainda não gerado — roda 23:45.</em>'}</div></div>`;
-                html += '<div class="dna-section" style="margin-top:16px;"><strong>🗓️ CURTO PRAZO &mdash; user-memory.md (janela 30 dias)</strong>';
+                html += '<div class="dna-section" style="margin-top:16px;"><strong>🗓️ CURTO PRAZO &mdash; user-memoria.md (janela 30 dias)</strong>';
                 html += `<div style="font-size:0.9rem;margin-top:6px;">${memMd ? marked.parse(memMd) : '<em style="color:#6a7a8a;">Sem memória de curto prazo.</em>'}</div></div>`;
                 html += '</div>';
                 container.innerHTML = html;
