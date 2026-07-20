@@ -1476,7 +1476,6 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
         let searchMode = 'filter'; // 'filter' | 'semantic'
         let semanticResults = null;
         let semanticJournal = [];  // journal bullets matched by the last deep search
-        let searchDebounce = null;
         let searchToken = 0;
         let sortMode = 'recent'; // 'recent' (default) | 'relevance' — applies to deep-search results
         let lastDeepQuery = '';
@@ -1619,29 +1618,6 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
             return (q || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').match(/[a-z0-9_]+/g) || [];
         }
 
-        function scheduleDeepSearch(query, filteredCount) {
-            clearTimeout(searchDebounce);
-            if (query.length < 3 || filteredCount > 0) return;
-            const tokenAtSchedule = searchToken + 1;
-            searchDebounce = setTimeout(async () => {
-                if (document.getElementById('search-box').value.trim().toLowerCase() !== query) return;
-                if (searchMode !== 'filter') return;
-                const currentFiltered = index.filter(c => {
-                    const q = query;
-                    const matchTxt = !q || c.summary.toLowerCase().includes(q);
-                    const sk = document.getElementById('skill-filter').value;
-                    const mach = document.getElementById('mach-filter').value;
-                    const matchSk = (sk === 'all') || (c.skill === sk);
-                    const matchIA = (srcFilter === 'all') || (srcFilter === 'web' ? c.machine === 'WEB' : c.source === srcFilter);
-                    const matchMach = (mach === 'all') || (c.machine === mach);
-                    return matchTxt && matchSk && matchIA && matchMach;
-                });
-                if (currentFiltered.length === 0 && tokenAtSchedule > searchToken) {
-                    await runDeepSearch(query, {auto: true});
-                }
-            }, 250);
-        }
-
         function apply() {
             const t = document.getElementById('search-box').value.toLowerCase();
             const sk = document.getElementById('skill-filter').value;
@@ -1654,14 +1630,9 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                 return matchTxt && matchSk && matchIA && matchMach;
             });
             if (t) {
-                if (filtered.length > 0) {
-                    setModeBadge('mode-filter', `Filtro rápido — ${filtered.length} resultados`);
-                } else {
-                    setModeBadge('mode-filter', 'Filtro rápido zerado; aprofundando...');
-                }
-                scheduleDeepSearch(t.trim(), filtered.length);
+                setModeBadge('mode-filter', `Filtro rápido — ${filtered.length} resultados`);
+                // No automatic deep search here (v8.2): only Enter / the button trigger it.
             } else {
-                clearTimeout(searchDebounce);
                 resetSearchMode();
             }
             renderList(filtered, null);
@@ -1709,12 +1680,10 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
         async function doSemanticSearch() {
             const query = document.getElementById('search-box').value.trim();
             if (!query) { clearSearch(); return; }
-            clearTimeout(searchDebounce);
             await runDeepSearch(query, {auto: false});
         }
 
         function clearSearch() {
-            clearTimeout(searchDebounce);
             document.getElementById('search-box').value = '';
             resetSearchMode();
             apply();
@@ -1727,16 +1696,9 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                 doSemanticSearch();
             } else if (e.key === 'Escape') {
                 clearSearch();
-            } else {
-                // Typing: switch back to fast filter mode
-                if (searchMode === 'semantic') {
-                    resetSearchMode();
-                }
             }
         });
-        document.getElementById('search-box').oninput = function() {
-            if (searchMode === 'filter') apply();
-        };
+        // No search-as-you-type: searching runs only on Enter or the search button.
         document.getElementById('skill-filter').onchange = apply;
         document.getElementById('mach-filter').onchange = apply;
 
