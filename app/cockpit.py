@@ -1408,12 +1408,11 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                     <button class="filter-btn" data-filter="gemini" onclick="setFilter('src','gemini',this)"><i class="bi bi-stars"></i> Gemini</button>
                     <button class="filter-btn" data-filter="claude" onclick="setFilter('src','claude',this)"><i class="bi bi-chat-dots"></i> Claude</button>
                     <button class="filter-btn" data-filter="codex" onclick="setFilter('src','codex',this)"><i class="bi bi-terminal"></i> Codex</button>
-                    <button class="filter-btn" data-filter="deepseek" onclick="setFilter('src','deepseek',this)"><i class="bi bi-lightning-charge"></i> DeepSeek</button>
-                    <button class="filter-btn" data-filter="chatgpt" onclick="setFilter('src','chatgpt',this)"><i class="bi bi-globe2"></i> ChatGPT</button>
+                    <button class="filter-btn" data-filter="web" onclick="setFilter('src','web',this)"><i class="bi bi-globe2"></i> WEB</button>
                 </div>
                 <div class="d-flex gap-2">
                     <select id="skill-filter" class="filter-select" style="flex:1"><option value="all">Todas Skills</option>{{OPTS}}</select>
-                    <select id="mach-filter" class="filter-select" style="flex:1"><option value="all">Todas Maq</option><option value="WIN">WIN</option><option value="LNX">LNX</option><option value="DKR">DKR</option></select>
+                    <select id="mach-filter" class="filter-select" style="flex:1"><option value="all">Todas Maq</option><option value="WIN">WIN</option><option value="LNX">LNX</option><option value="DKR">DKR</option><option value="WEB">WEB</option></select>
                 </div>
             </div>
             <div class="chat-list" id="chat-list"></div>
@@ -1633,7 +1632,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                     const sk = document.getElementById('skill-filter').value;
                     const mach = document.getElementById('mach-filter').value;
                     const matchSk = (sk === 'all') || (c.skill === sk);
-                    const matchIA = (srcFilter === 'all') || (c.source === srcFilter);
+                    const matchIA = (srcFilter === 'all') || (srcFilter === 'web' ? c.machine === 'WEB' : c.source === srcFilter);
                     const matchMach = (mach === 'all') || (c.machine === mach);
                     return matchTxt && matchSk && matchIA && matchMach;
                 });
@@ -1650,7 +1649,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
             const filtered = index.filter(c => {
                 const matchTxt = !t || c.summary.toLowerCase().includes(t);
                 const matchSk = (sk === 'all') || (c.skill === sk);
-                const matchIA = (srcFilter === 'all') || (c.source === srcFilter);
+                const matchIA = (srcFilter === 'all') || (srcFilter === 'web' ? c.machine === 'WEB' : c.source === srcFilter);
                 const matchMach = (mach === 'all') || (c.machine === mach);
                 return matchTxt && matchSk && matchIA && matchMach;
             });
