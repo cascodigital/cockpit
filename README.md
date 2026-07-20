@@ -16,7 +16,7 @@
 
 ---
 
-Self-hosted forensic UI that indexes [Claude Code](https://docs.claude.com/en/docs/claude-code), [Codex CLI](https://github.com/openai/codex), and [Gemini CLI](https://github.com/google-gemini/gemini-cli) sessions across every machine you use. Hybrid search (BM25 + embeddings), daily LLM-generated audits with behavioral patterns, and a memory profile distilled from recurring themes — all in one dashboard you control.
+Self-hosted forensic UI that indexes [Claude Code](https://docs.claude.com/en/docs/claude-code), [Codex CLI](https://github.com/openai/codex), and [Gemini CLI](https://github.com/google-gemini/gemini-cli) sessions across every machine you use — plus optional web-app captures. Hybrid search (BM25 + embeddings), natural-language questions answered from your own history, daily LLM-generated audits, and a distilled memory profile — all in one dashboard you control.
 
 ![Sidebar](docs/screenshots/01-sidebar-chat.png)
 
@@ -24,27 +24,37 @@ Self-hosted forensic UI that indexes [Claude Code](https://docs.claude.com/en/do
 
 CLI assistants scatter `.jsonl` files across `~/.claude/`, `~/.codex/`, `~/.gemini/` on every machine. There's no global search, no recall, no "what did I work on last Thursday" view. Cockpit fixes that.
 
+## What you can do with it
+
+- **Ask your own history a question.** *"Did we ever fix that office smart plug? How did it end?"* — `Ctrl+Enter` sends the question to the Panopticon, which answers from your distilled journal with the dates that back each claim.
+- **Find the buried conversation.** Deep search fuses chunk-level BM25 with embeddings, so a topic discussed at minute 40 of a long mixed session still surfaces — and matching journal bullets render above the chat hits, so you often get the *answer*, not just where it lives.
+- **Read a daily audit of yourself.** Every night an LLM turns the day's sessions into an ops brief: headline, narrative, workstreams with advanced/blocked status, focus score, and a category heatmap across two weeks.
+- **Feed your agents long-term memory.** The turtle button shows the exact two-layer context (permanent core + rolling 30-day window) you can inject into your assistant's boot prompt; the memory profile distills recurring patterns and open homework from coaching-style sessions.
+
 ## Features
 
 | Feature | Description |
 |---------|-------------|
 | **Hybrid Search** | Chunk-level BM25 (accent-insensitive) + optional Gemini embeddings, fused via Reciprocal Rank Fusion, with optional LLM reranking |
-| **Daily Audit** | LLM-generated structured JSON: headline, narrative, behavioral patterns, focus score |
+| **Ask the Panopticon** | Natural-language Q&A over your journal with cited dates (`/api/ask`, Ctrl+Enter in the UI). Works with any OpenAI-compatible endpoint, including a local Ollama |
+| **Journal Integration** | Optional distilled-notes vault (`BRAIN_DATA`): deep search returns matching bullets, `/api/journal` serves the files. No API involved |
+| **Daily Ops Brief** | LLM-generated structured JSON: headline, narrative, workstreams (advanced/maintained/blocked/noise), focus score — with anti-repetition control fed by recent audits |
 | **Weekly Digest** | Cross-cutting analysis over the last 7 daily audits |
 | **Memory Profile** | Long-term distillation of recurring themes, blockers, and open threads |
+| **Injected Memory View** | Two-layer assistant context (permanent core + recent window) rendered in one scroll |
 | **Category Heatmap** | Visual breakdown of session topics across the last 14 days |
-| **Per-source Badges** | Color-coded sessions by AI (Claude/Gemini/Codex) and host (WIN/LNX/DKR) |
+| **Per-source Badges** | Color-coded sessions by AI (Claude/Gemini/Codex/web) and host (WIN/LNX/DKR/WEB) |
 | **Custom Voice** | Opinionated auditor persona for the daily/weekly summaries — fully swappable in the prompt |
 
 ## Screenshots
 
-| Daily Audit Dashboard | Semantic Search |
+| Ask the Panopticon | Daily Audit Dashboard |
 |:---:|:---:|
-| ![Daily Audit](docs/screenshots/02-daily-audit.png) | ![Search](docs/screenshots/03-semantic-search.png) |
+| ![Ask](docs/screenshots/02-ask-panopticon.png) | ![Daily Audit](docs/screenshots/03-daily-audit.png) |
 
-| Memory Profile | |
+| Memory Profile | Injected Memory |
 |:---:|:---:|
-| ![Memory](docs/screenshots/04-memory-profile.png) | |
+| ![Memory](docs/screenshots/04-memory-profile.png) | ![Injected Memory](docs/screenshots/05-injected-memory.png) |
 
 ## Architecture
 
@@ -54,12 +64,13 @@ CLI assistants scatter `.jsonl` files across `~/.claude/`, `~/.codex/`, `~/.gemi
 ~/.claude/projects/  ----rsync-->  | data/claude/        |
 ~/.codex/sessions/   ----cron --->  | data/codex/         |  --> cockpit.py
 ~/.gemini/tmp/...    ----rsync-->  | data/gemini/        |        |
-                                  |                     |        +-- index worker (BM25)
-                                  | daily_audit.json    | <------+   every 150s
-                                  | search_index.json   |        |
-                                  | memory_profile.json |        +-- /api/search
-                                  +---------------------+        +-- /api/memory/*
-                                                                 +-- web UI :8000
+web captures (opt.)  ---------->  | data/*_site/        |        +-- index worker (BM25)
+journal vault (opt.) ---------->  | data/brain/journal/ | <------+   every 150s
+                                  |                     |        |
+                                  | daily_audit.json    |        +-- /api/search
+                                  | search_index.json   |        +-- /api/ask
+                                  | memory_profile.json |        +-- /api/memory/*
+                                  +---------------------+        +-- web UI :8000
 ```
 
 Sync is push-based: each client cron-rsyncs its session directory to the server. The server only reads — it never SSHes back out.
@@ -79,7 +90,8 @@ cockpit/
 │   │   ├── codex_sync.sh
 │   │   └── gemini_sync.sh
 │   └── demo/
-│       └── seed-data.py        # Generates fake data for demos/screenshots
+│       ├── seed-data.py        # Generates fake data for demos/screenshots
+│       └── mock-llm.py         # OpenAI-compatible stub for keyless ask/rerank testing
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── CONFIGURATION.md
@@ -143,13 +155,19 @@ All config via env vars. See [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) fo
 | `PORT` | `8000` | HTTP listen port |
 | `DEEPSEEK_API_KEY` | — | Primary LLM for audits (cheap, JSON-mode reliable) |
 | `GEMINI_API_KEY` | — | Fallback LLM + embeddings for semantic search |
-| `OPENAI_API_KEY` | — | Optional: enables LLM reranking of search results |
-| `RERANK_MODEL` | `gpt-4o-mini` | OpenAI model used for reranking |
+| `OPENAI_API_KEY` | — | Optional: enables LLM reranking + Ask the Panopticon |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Any OpenAI-compatible server (Ollama, LM Studio, vLLM). Local servers need no key |
+| `RERANK_MODEL` | `gpt-4o-mini` | Model used for reranking |
 | `RERANK_TOP` | `30` | How many top candidates to rerank per query |
+| `ASK_MODEL` | `gpt-4o-mini` | Model that answers `/api/ask` questions |
+| `ASK_CHAR_BUDGET` | `90000` | Journal context cap for `/api/ask` (~27k tokens) |
+| `ASK_RECENT_DAYS` | `5` | Newest journal days always included in `/api/ask` context |
+| `BRAIN_DATA` | `/app/data/brain` | Optional distilled-notes vault (`journal/YYYY-MM-DD.md`) |
+| `MEMORY_SKILL` | (empty) | Skill name whose sessions feed the memory profile; empty disables it |
 | `TZ` | `UTC` | Affects daily audit date boundaries |
-| `MEMORY_KEYWORDS` | (empty) | Comma-separated filter for the memory distiller |
+| `INDEX_INTERVAL` | `150` | Seconds between filesystem index scans |
 
-At least one of `DEEPSEEK_API_KEY` / `GEMINI_API_KEY` is required. Without `GEMINI_API_KEY`, semantic search degrades to BM25-only — still very usable. Reranking is fully optional: without `OPENAI_API_KEY` the search returns the RRF-fused order unchanged.
+**No API key at all?** Everything file-based still works: indexing, BM25 search, journal panel, the UI. `GEMINI_API_KEY` adds semantic embeddings, `DEEPSEEK_API_KEY`/`GEMINI_API_KEY` add the nightly audits, and an OpenAI-compatible endpoint (cloud key **or** local server via `OPENAI_BASE_URL`) adds reranking and Ask the Panopticon. Each feature degrades independently.
 
 ## API
 
@@ -158,11 +176,15 @@ At least one of `DEEPSEEK_API_KEY` / `GEMINI_API_KEY` is required. Without `GEMI
 | `/` | GET | Web UI |
 | `/api/chats` | GET | All indexed sessions (metadata) |
 | `/api/chat/<uid>` | GET | Full messages of one session |
-| `/api/search` | POST | Hybrid BM25 + semantic search. Body: `{"query": "..."}` |
+| `/api/search` | POST | Hybrid search. Body: `{"query": "..."}` → `{results, journal}` |
+| `/api/ask` | POST | Ask the journal. Body: `{"question": "..."}` → `{answer, sources, model}` |
+| `/api/journal` | GET | Raw journal files from `BRAIN_DATA`, newest first |
 | `/api/search/status` | GET | Index health |
 | `/api/memory/daily` | GET | Rolling 14-day audit history |
 | `/api/memory/weekly` | GET | On-demand weekly digest (regenerates per call) |
 | `/api/memory/profile` | GET | Long-term distilled memory |
+| `/api/memory/core` | GET | Permanent injected-memory layer (`ai_config/user-core.md`) |
+| `/api/memory/memoria` | GET | Recent injected-memory layer (`ai_config/user-memoria.md`) |
 | `/api/skill_log` | POST | Tag the next session with a skill |
 
 ## Stack
@@ -170,7 +192,7 @@ At least one of `DEEPSEEK_API_KEY` / `GEMINI_API_KEY` is required. Without `GEMI
 - **Python 3.11** stdlib HTTP server (no Flask/FastAPI dependency)
 - **rank-bm25** + **numpy** for chunk-level keyword search
 - **Google Gemini** embeddings (optional) for semantic search
-- **OpenAI** (optional) for LLM reranking of search results
+- **Any OpenAI-compatible endpoint** (optional — OpenAI, Ollama, LM Studio, vLLM) for reranking and `/api/ask`
 - **DeepSeek** (primary) + **Gemini** (fallback) for daily audits and memory distillation
 - **Docker Compose** deployment
 - **Bash + rsync** for client-side syncing (no agent on clients)

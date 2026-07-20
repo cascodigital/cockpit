@@ -328,6 +328,82 @@ def main():
     }
     (data_dir / "weekly_digest.json").write_text(json.dumps(weekly, indent=2))
 
+    # Distilled journal (BRAIN_DATA) — feeds /api/journal, the journal panel in
+    # deep search, and the Ask-the-Panopticon context
+    journal_dir = data_dir / "brain" / "journal"
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    journal_days = [
+        (today, [
+            ("Infra", [
+                "Renamed the office smart-plug strip in Home Assistant: socket_1=USB hub, socket_2=laptop, socket_3=left lamp, socket_4=right lamp",
+                "Left lamp now turns off when the TV switches to HDMI3; right lamp follows the TV unconditionally",
+            ]),
+            ("Dev", [
+                "Postgres migration pattern settled: nullable column add, batched backfill, validated constraint — in that order",
+            ]),
+        ]),
+        (today - timedelta(days=1), [
+            ("AI-Tooling", [
+                "Vector DB benchmark concluded: staying with pgvector, dedicated engines deferred until >5M embeddings",
+                "RAG pipeline draft finally runs end-to-end against the docs corpus",
+            ]),
+            ("Infra", [
+                "Docker prune workflow moved from host cron to a scheduled container — hosts stay clean",
+            ]),
+        ]),
+        (today - timedelta(days=2), [
+            ("Dev", [
+                "Flaky CI test traced to a timezone-naive datetime comparison; fixed with aware UTC datetimes",
+                "~~Adopt Rust for the log parser~~ (revoked: Python + polars was fast enough)",
+            ]),
+        ]),
+    ]
+    for day, sections in journal_days:
+        lines = []
+        for section, bullets in sections:
+            lines.append(f"## {section}")
+            lines.extend(f"- {b}" for b in bullets)
+            lines.append("")
+        (journal_dir / f"{day.strftime('%Y-%m-%d')}.md").write_text("\n".join(lines))
+
+    # Two-layer injected memory (turtle button): permanent core + recent window
+    ai_config = data_dir / "ai_config"
+    ai_config.mkdir(parents=True, exist_ok=True)
+    (ai_config / "user-core.md").write_text(
+        "# Stable stack & tools\n"
+        "- Primary workstation: Linux laptop + small ARM home server running the Docker stack\n"
+        "- Automation: n8n for workflows, Home Assistant for the house\n"
+        "- Editor: Neovim; terminal-first everything\n\n"
+        "# Durable decisions\n"
+        "- pgvector over dedicated vector DBs until the corpus outgrows it\n"
+        "- No paid SaaS monitoring — self-hosted Prometheus + Grafana\n"
+    )
+    (ai_config / "user-memoria.md").write_text(
+        "# Last 30 days\n"
+        "- RAG pipeline draft now runs end-to-end; retrieval quality still untuned\n"
+        "- Postgres migration shipped with the three-step safe pattern\n"
+        "- Office smart-plug strip renamed and automated against the TV input\n"
+        "- Open: OKR template still not sent to the team\n"
+    )
+
+    # A couple of web-captured sessions (machine=WEB badge)
+    for site_dir, source, title, url in [
+        ("chatgpt_site", "chatgpt", "Explaining CRDTs for a design doc", "https://chatgpt.com/c/demo-crdt"),
+        ("claude_site", "claude", "Reviewing the RAG chunking strategy", "https://claude.ai/chat/demo-rag"),
+    ]:
+        d = data_dir / site_dir / today.strftime("%Y/%m")
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"demo-{source}.json").write_text(json.dumps({
+            "sessionId": f"demo-{source}-web",
+            "title": title,
+            "url": url,
+            "startTime": (today - timedelta(hours=5)).isoformat(),
+            "messages": [
+                {"role": "user", "content": f"{title}?"},
+                {"role": "assistant", "content": f"Sure — here is a practical take on {title.lower()}..."},
+            ],
+        }, indent=2))
+
     print(f"Seeded {len(SESSIONS)} sessions across {len(audit_entries)} days into {data_dir}")
     print(f"  - {data_dir}/claude/demo/")
     print(f"  - {data_dir}/gemini/demo/chats/")
@@ -335,6 +411,9 @@ def main():
     print(f"  - {data_dir}/daily_audit.json ({len(audit_entries)} days)")
     print(f"  - {data_dir}/memory_profile.json")
     print(f"  - {data_dir}/weekly_digest.json")
+    print(f"  - {data_dir}/brain/journal/ ({len(journal_days)} days)")
+    print(f"  - {data_dir}/ai_config/ (user-core.md, user-memoria.md)")
+    print(f"  - {data_dir}/chatgpt_site/, {data_dir}/claude_site/ (WEB captures)")
 
 
 if __name__ == "__main__":

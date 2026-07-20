@@ -12,30 +12,60 @@ All runtime knobs are environment variables. The full set:
 | `CLAUDE_DATA` | `/app/data/claude` | Where to find raw Claude `.jsonl` logs |
 | `CLAUDE_CONVERTED` | `/app/data/claude_converted` | Where `sync_claude()` writes normalized `.json` |
 | `CODEX_DATA` | `/app/data/codex` | Where to find Codex `.jsonl` logs |
+| `CHATGPT_SITE_DATA` | `/app/data/chatgpt_site` | Web-captured ChatGPT sessions (`machine=WEB`) |
+| `GEMINI_SITE_DATA` | `/app/data/gemini_site` | Web-captured Gemini sessions (`machine=WEB`) |
+| `CLAUDE_SITE_DATA` | `/app/data/claude_site` | Web-captured Claude sessions (`machine=WEB`) |
+| `BRAIN_DATA` | `/app/data/brain` | Optional distilled-notes vault (see Journal below) |
+| `INDEX_INTERVAL` | `150` | Seconds between filesystem index scans |
 | `DEEPSEEK_API_KEY` | — | Primary LLM for audits/digests. Cheap, JSON-mode reliable |
 | `GEMINI_API_KEY` | — | Fallback LLM, AND the embeddings provider for semantic search |
-| `OPENAI_API_KEY` | — | Optional. Enables LLM reranking of search results |
-| `RERANK_MODEL` | `gpt-4o-mini` | OpenAI model used for reranking |
+| `OPENAI_API_KEY` | — | Optional. Enables LLM reranking + `/api/ask` |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Any OpenAI-compatible server. Setting it (even without a key) enables rerank/ask — e.g. Ollama `http://host:11434/v1` |
+| `RERANK_MODEL` | `gpt-4o-mini` | Model used for reranking |
 | `RERANK_TOP` | `30` | Number of top candidates reranked per query |
+| `ASK_MODEL` | `gpt-4o-mini` | Model answering `/api/ask` |
+| `ASK_CHAR_BUDGET` | `90000` | Max journal characters sent as `/api/ask` context |
+| `ASK_RECENT_DAYS` | `5` | Newest journal days always included in the context |
 
-You need at least one of `DEEPSEEK_API_KEY` / `GEMINI_API_KEY`. Without
-`GEMINI_API_KEY`, semantic search degrades to BM25-only.
+Everything degrades independently: with no keys at all you keep indexing, BM25
+search, the journal panel and the whole UI. `GEMINI_API_KEY` adds embeddings;
+DeepSeek/Gemini add nightly audits; an OpenAI-compatible endpoint adds
+reranking and ask.
 
-Reranking is optional. Without `OPENAI_API_KEY`, `/api/search` returns the
-RRF-fused order unchanged. When set, the top `RERANK_TOP` candidates are
-reordered by an LLM judging conceptual relevance against the matched snippet
-(not the whole-chat summary, which would bias long mixed-topic chats).
+Reranking is optional. Without an LLM, `/api/search` returns the RRF-fused
+order unchanged. When enabled, the top `RERANK_TOP` candidates are reordered by
+an LLM judging conceptual relevance against the matched snippet (not the
+whole-chat summary, which would bias long mixed-topic chats).
+
+## Journal / Ask the Panopticon
+
+Point `BRAIN_DATA` at a directory containing `journal/YYYY-MM-DD.md` files —
+the output of whatever daily distillation pipeline you run (or plain
+hand-written notes). Format expectations are minimal:
+
+- `## Section` headers group bullets
+- `- ` bullets are the searchable units
+- `~~struck-through~~` bullets are treated as revoked by `/api/ask`
+
+With a vault present, deep search returns matching bullets above the chat hits
+and `POST /api/ask {"question": ...}` answers natural-language questions from
+the journal, citing the dates it used. The context is assembled RAG-lite: the
+`ASK_RECENT_DAYS` newest days always enter, older days only when they match the
+question's terms, capped at `ASK_CHAR_BUDGET`.
+
+To try it without any account: `python scripts/demo/mock-llm.py` and set
+`OPENAI_BASE_URL=http://localhost:9999` (or a real local Ollama).
 
 ## Memory distiller (`app/memory_distiller.py`)
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MEMORY_KEYWORDS` | `""` (empty) | Comma-separated keywords. Only chats containing any of them feed the distiller. Empty = take the 15 most recent regardless |
-| `MEMORY_LIMIT` | `15` | Max chats sent to the distiller in one run |
+| `MEMORY_SKILL` | `""` (empty) | Skill slug whose sessions feed the profile, matched against `skill_log` activations by time window. Empty = distiller disabled |
 
-Use case for `MEMORY_KEYWORDS`: if you have a journaling / coaching / planning
-keyword you use consistently (e.g. `journal,reflection,coaching`), the profile
-will be much sharper than letting the distiller chew on random debug sessions.
+Tag your reflective/coaching sessions via `POST /api/skill_log` (see Skills
+below) with a dedicated slug and set `MEMORY_SKILL` to it. Only those sessions
+are distilled into `memory_profile.json` — time-window matching against real
+activations avoids the false positives keyword matching produces.
 
 ## Sync clients (`scripts/sync/.env`)
 
@@ -114,6 +144,10 @@ data/
 ├── claude_converted/                    # normalized by sync_claude()
 ├── codex/<client_name>/sessions/        # raw .jsonl, pushed by codex_sync.sh
 ├── gemini/<client_name>/chats/          # normalized .json, pushed by gemini_sync.sh
+├── chatgpt_site/ gemini_site/ claude_site/  # optional web captures (machine=WEB)
+├── brain/journal/                       # optional distilled-notes vault (BRAIN_DATA)
+├── ai_config/user-core.md               # optional: permanent injected-memory layer
+├── ai_config/user-memoria.md            # optional: recent injected-memory layer
 ├── search_index.json                    # embeddings cache
 ├── skill_log.jsonl                      # tags from POST /api/skill_log
 ├── daily_audit.json                     # rolling 14-day audit history
