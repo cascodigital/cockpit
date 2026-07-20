@@ -7,14 +7,15 @@ import requests
 DATA_DIR = "/app/data"
 GEMINI_DIR = os.path.join(DATA_DIR, "gemini")
 CLAUDE_DIR = os.path.join(DATA_DIR, "claude_converted")
-OUTPUT_FILE = os.path.join(DATA_DIR, "ludovico_dna.json")
+OUTPUT_FILE = os.path.join(DATA_DIR, "memory_profile.json")
 SKILL_LOG_PATH = os.path.join(DATA_DIR, "skill_log.jsonl")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 
-# Legacy fallback kept only for reference; real matching comes from skill_log.
-LUDOVICO_KEYWORDS = ["skpsi", "leto ii", "ludovico von drake"]
+# Skill whose sessions feed the memory profile (matched against skill_log
+# activations by time window). Empty = distiller disabled.
+MEMORY_SKILL = os.environ.get("MEMORY_SKILL", "").strip()
 BRT = timezone(timedelta(hours=-3))
 
 def load_existing_dna():
@@ -62,7 +63,7 @@ def _load_skpsi_activations():
                 d = json.loads(line)
             except Exception:
                 continue
-            if d.get("skill") != "skpsi":
+            if d.get("skill") != MEMORY_SKILL:
                 continue
             ag = d.get("agent")
             if ag in acts:
@@ -174,6 +175,9 @@ def call_gemini(prompt_text):
     return r.json()["candidates"][0]["content"]["parts"][0]["text"]
 
 def distill_memory():
+    if not MEMORY_SKILL:
+        print("[MemoryProfile] MEMORY_SKILL not set - distiller disabled.")
+        return
     existing_dna = load_existing_dna()
     since_dt = get_last_updated(existing_dna)
 
