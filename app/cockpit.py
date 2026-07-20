@@ -26,7 +26,7 @@ except ImportError:
     from rank_bm25 import BM25Okapi
     import numpy as np
 
-import ludovico_distiller
+import memory_distiller
 import daily_auditor
 
 # CONFIGURAÇÃO
@@ -605,7 +605,6 @@ def index_worker():
     global CHAT_INDEX, CHAT_MESSAGES
     file_metadata = {}
     last_distill_date = None
-    last_ludovico_date = None
     while True:
         try:
             sync_claude()
@@ -741,8 +740,8 @@ def index_worker():
             # Atualiza o memory profile primeiro para a memória diária já ler o estado mais recente.
             try:
                 import importlib
-                importlib.reload(ludovico_distiller)
-                ludovico_distiller.distill_memory()
+                importlib.reload(memory_distiller)
+                memory_distiller.distill_memory()
                 print(f'[{now}] [MemoryProfile] Updated.')
             except Exception as e:
                 print(f'[{now}] [MemoryProfile] Error: {e}')
@@ -771,8 +770,8 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                 data = CHAT_MESSAGES.get(uid, {"msgs":[]})
                 self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
                 self.wfile.write(json.dumps(data).encode('utf-8'))
-            elif self.path == '/api/memory/ludovico':
-                dna_path = os.path.join(DATA_DIR, 'ludovico_dna.json')
+            elif self.path == '/api/memory/profile':
+                dna_path = os.path.join(DATA_DIR, 'memory_profile.json')
                 if os.path.exists(dna_path):
                     with open(dna_path, 'r', encoding='utf-8') as f: data = f.read()
                     self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
@@ -1803,7 +1802,7 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
             currentChat = null;
 
             try {
-                const r = await fetch('/api/memory/ludovico');
+                const r = await fetch('/api/memory/profile');
                 const data = await r.json();
                 loading.style.display = 'none';
                 function formatDna(v) {
