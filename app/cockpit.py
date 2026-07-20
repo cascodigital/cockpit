@@ -46,6 +46,7 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 EMBED_DISABLED = False  # set True on first API failure
 EMBED_RUNNING = False  # prevent concurrent embed threads
 SEARCH_INDEX_PATH = os.path.join(DATA_DIR, 'search_index.json')
+BRAIN_DIR = os.environ.get('BRAIN_DATA', '/app/data/brain')  # optional: distilled-notes vault with journal/*.md
 
 # Keep in sync with the skills that actually exist on disk (~/.claude/skills).
 # Stale entries here show wrong/empty badges in the sidebar and a dead option in
@@ -531,6 +532,46 @@ def llm_rerank(query, candidates):
         print(f'[Rerank] error: {e}', flush=True)
         return None
 
+def list_journal():
+    """Journal files from the BRAIN_DATA vault, newest first. Optional feature:
+    returns [] when the directory does not exist."""
+    out = []
+    jdir = os.path.join(BRAIN_DIR, 'journal')
+    if not os.path.isdir(jdir):
+        return out
+    for path in sorted(glob.glob(os.path.join(jdir, '*.md')), reverse=True):
+        try:
+            with open(path, encoding='utf-8') as f:
+                out.append({'date': os.path.basename(path)[:-3], 'content': f.read()})
+        except Exception:
+            continue
+    return out
+
+def search_journal(query, limit=8):
+    """Match query terms against the distilled '- ' bullets of the journal."""
+    terms = [t for t in tokenize(query) if len(t) >= 3]  # drop short filler (a, of, to...)
+    if not terms:
+        return []
+    # Natural questions carry filler words ("how did the...") that never appear in the
+    # journal: require only 1/3 of the terms and rank by score — small corpus, low noise.
+    need = max(1, len(terms) // 3)
+    hits = []
+    for day in list_journal():
+        section = ''
+        for line in day['content'].split('\n'):
+            if line.startswith('## '):
+                section = line[3:].strip()
+                continue
+            if not line.startswith('- '):
+                continue
+            text = line[2:].strip()
+            ltoks = ' '.join(tokenize(text))
+            score = sum(1 for t in terms if t in ltoks)
+            if score >= need:
+                hits.append({'score': score, 'date': day['date'], 'section': section, 'text': text})
+    hits.sort(key=lambda h: (h['score'], h['date']), reverse=True)
+    return [{'date': h['date'], 'section': h['section'], 'text': h['text']} for h in hits[:limit]]
+
 def hybrid_search(query, top_k=30):
     """RRF fusion of BM25 + semantic embeddings, with optional LLM reranking."""
     query_terms = tokenize(query)
@@ -765,6 +806,10 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
             elif self.path == '/api/chats':
                 self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
                 self.wfile.write(json.dumps(CHAT_INDEX).encode('utf-8'))
+            elif self.path == '/api/journal':
+                self.send_response(200); self.send_header('Content-type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*'); self.end_headers()
+                self.wfile.write(json.dumps(list_journal()).encode('utf-8'))
             elif self.path.startswith('/api/chat/'):
                 uid = self.path.replace('/api/chat/', '')
                 data = CHAT_MESSAGES.get(uid, {"msgs":[]})
@@ -861,12 +906,13 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                 if not query:
                     self.send_response(400); self.end_headers(); self.wfile.write(b'{"error": "no query"}')
                     return
-                results = hybrid_search(query)
+                # {results, journal}: chat hits plus matching distilled-journal bullets
+                payload = {'results': hybrid_search(query), 'journal': search_journal(query)}
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
-                self.wfile.write(json.dumps(results).encode('utf-8'))
+                self.wfile.write(json.dumps(payload).encode('utf-8'))
 
             else:
                 self.send_error(404)
@@ -1430,6 +1476,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
         let index = [], currentChat = null, currentItem = null, srcFilter = 'all';
         let searchMode = 'filter'; // 'filter' | 'semantic'
         let semanticResults = null;
+        let semanticJournal = [];  // journal bullets matched by the last deep search
         let searchDebounce = null;
         let searchToken = 0;
         let sortMode = 'recent'; // 'recent' (default) | 'relevance' — applies to deep-search results
@@ -1509,14 +1556,17 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({query})
                 });
-                const results = await r.json();
+                const data = await r.json();
+                const results = Array.isArray(data) ? data : (data.results || []);
                 if (startedToken !== searchToken) return results;
 
                 semanticResults = results;
+                semanticJournal = Array.isArray(data) ? [] : (data.journal || []);
                 lastDeepQuery = query;
                 setModeBadge('mode-semantic', `${auto ? 'Busca profunda' : 'Semântico'} — ${results.length} resultados`);
                 showSortToggle(results.length > 1);
                 renderList(sortResults(results), query);
+                showJournalPanel(query);
                 return results;
             } catch(e) {
                 if (startedToken === searchToken) {
@@ -1532,6 +1582,42 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                     btn.disabled = false;
                 }
             }
+        }
+
+        function showJournalPanel(query) {
+            // Journal hits render in the main panel, not in the chat list
+            if (!semanticJournal.length) return;
+            const welcome = document.getElementById('welcome-msg');
+            const container = document.getElementById('messages-container');
+            welcome.style.display = 'none';
+            currentChat = null;
+            const hl = (t) => {
+                let out = escapeHtml(t);
+                tokenizeJs(query).forEach(term => {
+                    if (term.length < 3) return;
+                    out = out.replace(new RegExp('(' + escapeRegex(term) + ')', 'gi'), '<span class="snippet-highlight">$1</span>');
+                });
+                return out;
+            };
+            const byDate = {};
+            semanticJournal.forEach(j => { (byDate[j.date] = byDate[j.date] || []).push(j); });
+            const days = Object.keys(byDate).sort().reverse();
+            container.innerHTML = '<div style="max-width:900px;margin:24px auto;padding:0 16px;">'
+                + '<div style="border:1px solid rgba(168,85,247,0.45);background:rgba(168,85,247,0.06);border-radius:12px;padding:20px 24px;">'
+                + '<div style="color:#c084fc;font-size:0.8rem;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:14px;">&#129504; Journal &mdash; distilled knowledge</div>'
+                + days.map(d => '<div style="margin-bottom:14px;">'
+                    + '<div style="color:#c084fc;font-weight:700;font-size:0.85rem;margin-bottom:6px;">' + d + '</div>'
+                    + byDate[d].map(j => '<div style="padding:8px 12px;margin-bottom:6px;background:var(--bg-secondary);border:1px solid var(--border);border-left:3px solid #a855f7;border-radius:6px;font-size:0.88rem;line-height:1.55;">'
+                        + '<span style="color:var(--text-muted);font-size:0.72rem;text-transform:uppercase;letter-spacing:0.5px;">' + escapeHtml(j.section) + '</span><br>'
+                        + hl(j.text) + '</div>').join('')
+                    + '</div>').join('')
+                + '<div style="color:var(--text-muted);font-size:0.72rem;margin-top:8px;">Source: BRAIN_DATA/journal &mdash; full chats stay in the list on the left.</div>'
+                + '</div></div>';
+            document.getElementById('chat-display').scrollTop = 0;
+        }
+
+        function tokenizeJs(q) {
+            return (q || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').match(/[a-z0-9_]+/g) || [];
         }
 
         function scheduleDeepSearch(query, filteredCount) {

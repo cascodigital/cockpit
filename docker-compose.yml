@@ -8,6 +8,8 @@ services:
     volumes:
       - ./app:/app
       - ./data:/app/data
+      # Optional: mount a distilled-notes vault (see BRAIN_DATA in .env.example)
+      # - /path/to/your/brain:/app/data/brain:ro
     environment:
       PORT: 8000
       TZ: ${TZ:-UTC}
@@ -15,8 +17,14 @@ services:
       CLAUDE_DATA: /app/data/claude
       CLAUDE_CONVERTED: /app/data/claude_converted
       CODEX_DATA: /app/data/codex
+      CHATGPT_SITE_DATA: /app/data/chatgpt_site
+      BRAIN_DATA: /app/data/brain
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      RERANK_MODEL: ${RERANK_MODEL:-gpt-4o-mini}
+      RERANK_TOP: ${RERANK_TOP:-30}
+      MEMORY_SKILL: ${MEMORY_SKILL:-}
       PYTHONUNBUFFERED: "1"
     command: python cockpit.py
     restart: unless-stopped
