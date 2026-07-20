@@ -18,7 +18,10 @@ services:
       CLAUDE_CONVERTED: /app/data/claude_converted
       CODEX_DATA: /app/data/codex
       CHATGPT_SITE_DATA: /app/data/chatgpt_site
+      GEMINI_SITE_DATA: /app/data/gemini_site
+      CLAUDE_SITE_DATA: /app/data/claude_site
       BRAIN_DATA: /app/data/brain
+      INDEX_INTERVAL: ${INDEX_INTERVAL:-150}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

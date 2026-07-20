@@ -36,8 +36,11 @@ CLAUDE_PROJECTS_DIR = os.environ.get('CLAUDE_DATA', '/app/data/claude')
 CLAUDE_CONVERTED_DIR = os.environ.get('CLAUDE_CONVERTED', '/app/data/claude_converted')
 CODEX_BASE_DIR = os.environ.get('CODEX_DATA', '/app/data/codex')
 CHATGPT_SITE_DIR = os.environ.get('CHATGPT_SITE_DATA', '/app/data/chatgpt_site')
+GEMINI_SITE_DIR = os.environ.get('GEMINI_SITE_DATA', '/app/data/gemini_site')
+CLAUDE_SITE_DIR = os.environ.get('CLAUDE_SITE_DATA', '/app/data/claude_site')
 DATA_DIR = '/app/data'
-APP_VERSION = '7.2'
+APP_VERSION = '8.5'
+INDEX_INTERVAL = int(os.environ.get('INDEX_INTERVAL', '150'))  # seconds between filesystem index scans
 SKILL_LOG_PATH = os.path.join(DATA_DIR, 'skill_log.jsonl')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')  # optional: enables LLM rerank + /api/ask
 # Any OpenAI-compatible server works (Ollama, LM Studio, vLLM...). Local servers need no key.
@@ -50,6 +53,7 @@ ASK_CHAR_BUDGET = int(os.environ.get('ASK_CHAR_BUDGET', '90000'))  # journal con
 ASK_RECENT_DAYS = int(os.environ.get('ASK_RECENT_DAYS', '5'))  # recent days always in /api/ask context
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 EMBED_DISABLED = False  # set True on first API failure
+EMBED_CAP_HIT = False  # set when the embeddings API returns 429 (quota/spending cap)
 EMBED_RUNNING = False  # prevent concurrent embed threads
 SEARCH_INDEX_PATH = os.path.join(DATA_DIR, 'search_index.json')
 BRAIN_DIR = os.environ.get('BRAIN_DATA', '/app/data/brain')  # optional: distilled-notes vault with journal/*.md
@@ -431,6 +435,11 @@ def get_embeddings_batch(texts):
             json={'requests': requests_payload},
             timeout=60
         )
+        if r.status_code == 429:
+            global EMBED_CAP_HIT
+            EMBED_CAP_HIT = True
+            print('[Embed] 429 spending cap / quota hit - pausing embeddings (BM25 search still works).', flush=True)
+            return None
         data = r.json()
         if 'embeddings' in data:
             return [e['values'] for e in data['embeddings']]
@@ -453,7 +462,8 @@ def update_embed_index():
 
 def _do_embed_index():
     """Inner embedding logic."""
-    global EMBED_DISABLED
+    global EMBED_DISABLED, EMBED_CAP_HIT
+    EMBED_CAP_HIT = False
     if not GEMINI_API_KEY or EMBED_DISABLED:
         return
     missing = [c['uid'] for c in CHAT_INDEX if c['uid'] not in EMBED_INDEX]
@@ -481,6 +491,10 @@ def _do_embed_index():
             print(f'[Embed] Batch {i // batch_size + 1} done. Total: {len(EMBED_INDEX)}/{len(CHAT_INDEX)}', flush=True)
             time.sleep(1)
         else:
+            if EMBED_CAP_HIT:
+                print('[Embed] Spending cap reached - disabling embeddings until restart. BM25 still active.', flush=True)
+                EMBED_DISABLED = True
+                return
             consecutive_failures += 1
             print(f'[Embed] Batch {i // batch_size + 1} failed after 3 attempts. Pausing...', flush=True)
             if consecutive_failures >= 2:
@@ -828,6 +842,72 @@ def index_worker():
                         m = CHAT_MESSAGES[uid]
                         current_chats[uid] = compact_chat_item(uid, m, None, m.get('title') or get_summary(m['msgs'], 'chatgpt'))
 
+            if os.path.isdir(GEMINI_SITE_DIR):
+                for f in glob.glob(os.path.join(GEMINI_SITE_DIR, '**', '*.json'), recursive=True):
+                    fname = os.path.basename(f)
+                    rel_name = os.path.relpath(f, GEMINI_SITE_DIR).replace(os.sep, '__')
+                    uid = f"gemini-web-{rel_name}"
+                    mtime = os.path.getmtime(f)
+                    if uid not in file_metadata or file_metadata[uid] < mtime:
+                        try:
+                            with open(f, 'r', encoding='utf-8') as j:
+                                data = json.load(j)
+                                proc = []
+                                for msg in data.get('messages', []):
+                                    role = msg.get('type') or msg.get('role') or 'gemini'
+                                    role = 'user' if role == 'user' else 'gemini'
+                                    content = clean_content(msg.get('content', ''))
+                                    if content:
+                                        mc = msg.copy(); mc['type'] = role; mc['content'] = content
+                                        proc.append(mc)
+                                if not proc:
+                                    continue
+                                sid = data.get("sessionId") or fname.replace(".json", "")
+                                start_raw = data.get('startTime') or data.get('capturedAt') or mtime
+                                date_str, raw_ts = format_date(start_raw)
+                                CHAT_MESSAGES[uid] = {"msgs": proc, "sid": sid, "machine": "WEB", "source": "gemini", "date": date_str, "raw_date": raw_ts, "start_raw": start_raw, "url": data.get("url", ""), "title": data.get("title", "")}
+                                file_metadata[uid] = mtime
+                                something_changed = True
+                        except Exception as e:
+                            print(f'[GeminiSite] parse error {f}: {e}')
+                            continue
+                    if uid in CHAT_MESSAGES:
+                        m = CHAT_MESSAGES[uid]
+                        current_chats[uid] = compact_chat_item(uid, m, None, m.get('title') or get_summary(m['msgs'], 'gemini'))
+
+            if os.path.isdir(CLAUDE_SITE_DIR):
+                for f in glob.glob(os.path.join(CLAUDE_SITE_DIR, '**', '*.json'), recursive=True):
+                    fname = os.path.basename(f)
+                    rel_name = os.path.relpath(f, CLAUDE_SITE_DIR).replace(os.sep, '__')
+                    uid = f"claude-web-{rel_name}"
+                    mtime = os.path.getmtime(f)
+                    if uid not in file_metadata or file_metadata[uid] < mtime:
+                        try:
+                            with open(f, 'r', encoding='utf-8') as j:
+                                data = json.load(j)
+                                proc = []
+                                for msg in data.get('messages', []):
+                                    role = msg.get('type') or msg.get('role') or 'claude'
+                                    role = 'user' if role == 'user' else 'claude'
+                                    content = clean_content(msg.get('content', ''))
+                                    if content:
+                                        mc = msg.copy(); mc['type'] = role; mc['content'] = content
+                                        proc.append(mc)
+                                if not proc:
+                                    continue
+                                sid = data.get("sessionId") or fname.replace(".json", "")
+                                start_raw = data.get('startTime') or data.get('capturedAt') or mtime
+                                date_str, raw_ts = format_date(start_raw)
+                                CHAT_MESSAGES[uid] = {"msgs": proc, "sid": sid, "machine": "WEB", "source": "claude", "date": date_str, "raw_date": raw_ts, "start_raw": start_raw, "url": data.get("url", ""), "title": data.get("title", "")}
+                                file_metadata[uid] = mtime
+                                something_changed = True
+                        except Exception as e:
+                            print(f'[ClaudeSite] parse error {f}: {e}')
+                            continue
+                    if uid in CHAT_MESSAGES:
+                        m = CHAT_MESSAGES[uid]
+                        current_chats[uid] = compact_chat_item(uid, m, None, m.get('title') or get_summary(m['msgs'], 'claude'))
+
             if something_changed:
                 sorted_list = list(current_chats.values())
                 sorted_list.sort(key=lambda x: x['raw_date'], reverse=True)
@@ -857,7 +937,7 @@ def index_worker():
                 print(f'[{now}] [Daily Audit] Updated.')
             except Exception as e:
                 print(f'[{now}] [Daily Audit] Error: {e}')
-        time.sleep(150)
+        time.sleep(INDEX_INTERVAL)
 
 # ─── HTTP HANDLER ────────────────────────────────────────────────────────────
 
@@ -1017,7 +1097,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cockpit v7.2</title>
+    <title>Cockpit v8.5</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
@@ -1462,7 +1542,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
         <!-- SIDEBAR -->
         <div class="col-md-3 sidebar">
             <div class="sidebar-header">
-                <h6>COCKPIT v7.2</h6>
+                <h6>COCKPIT v8.5</h6>
                 <div class="d-flex gap-2" style="margin-bottom:4px;">
                     <button class="header-btn" onclick="showDNA()" title="Memory Profile"><i class="bi bi-clipboard2-pulse"></i></button>
                     <button class="header-btn" onclick="showDailyAudit()" title="Daily Audit"><i class="bi bi-journal-text"></i></button>
@@ -1516,7 +1596,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
             </div>
             <div class="messages-scroll" id="chat-display">
                 <div id="welcome-msg" class="welcome">
-                    <div class="text-center"><h1>COCKPIT</h1><p>The Elder's Panopticon v7.2</p></div>
+                    <div class="text-center"><h1>COCKPIT</h1><p>The Elder's Panopticon v8.5</p></div>
                 </div>
                 <div id="loading-overlay" style="display:none;" class="loading-box">
                     <div class="spinner-border text-primary"></div>
@@ -1873,8 +1953,9 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                     date: currentItem.date || currentChat.date || '',
                 };
                 const cmdMap = {
-                    claude: `claude --resume ${sessionId}`,
-                    gemini: `gemini --conversation ${sessionId}`,
+                    // Web captures resume in the browser, not in the CLI
+                    claude: currentItem.machine === 'WEB' && currentChat.url ? currentChat.url : `claude --resume ${sessionId}`,
+                    gemini: currentItem.machine === 'WEB' && currentChat.url ? currentChat.url : `gemini --conversation ${sessionId}`,
                     codex: `codex resume ${sessionId}`,
                     deepseek: `deepseek --resume ${sessionId}`,
                     chatgpt: currentChat.url || `https://chatgpt.com/c/${sessionId}`
@@ -1944,7 +2025,7 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
 .hdr h2{font-size:1rem;color:#8899aa;font-weight:600;margin:0;letter-spacing:1px;}
 .hdr small{color:#3a4a5a;font-size:0.7rem;}</style></head>
 <body><div class="hdr"><h2>${src.toUpperCase()} SESSION${skillLabel}</h2><small>${date} &mdash; ${currentChat.msgs.length} mensagens</small></div>${msgs}
-<div style="text-align:center;padding:24px;color:#6a7a8a;font-size:0.65rem;border-top:1px solid #1e2a3a;margin-top:24px;">Exported from Cockpit v7.2</div></body></html>`;
+<div style="text-align:center;padding:24px;color:#6a7a8a;font-size:0.65rem;border-top:1px solid #1e2a3a;margin-top:24px;">Exported from Cockpit v8.5</div></body></html>`;
 
             const blob = new Blob([html], {type: 'text/html'});
             const a = document.createElement('a');
