@@ -4,7 +4,7 @@ import glob
 from datetime import datetime, timezone, timedelta
 import requests
 
-DATA_DIR = "/app/data"
+DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 GEMINI_DIR = os.path.join(DATA_DIR, "gemini")
 CLAUDE_DIR = os.path.join(DATA_DIR, "claude_converted")
 OUTPUT_FILE = os.path.join(DATA_DIR, "memory_profile.json")

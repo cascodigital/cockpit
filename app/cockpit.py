@@ -38,7 +38,7 @@ CODEX_BASE_DIR = os.environ.get('CODEX_DATA', '/app/data/codex')
 CHATGPT_SITE_DIR = os.environ.get('CHATGPT_SITE_DATA', '/app/data/chatgpt_site')
 GEMINI_SITE_DIR = os.environ.get('GEMINI_SITE_DATA', '/app/data/gemini_site')
 CLAUDE_SITE_DIR = os.environ.get('CLAUDE_SITE_DATA', '/app/data/claude_site')
-DATA_DIR = '/app/data'
+DATA_DIR = os.environ.get('DATA_DIR', '/app/data')
 APP_VERSION = '8.5'
 INDEX_INTERVAL = int(os.environ.get('INDEX_INTERVAL', '150'))  # seconds between filesystem index scans
 SKILL_LOG_PATH = os.path.join(DATA_DIR, 'skill_log.jsonl')
@@ -981,27 +981,33 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                     self.wfile.write(data.encode('utf-8'))
                 else: self.send_response(404); self.end_headers(); self.wfile.write(b'core memory not found')
             elif self.path == '/api/memory/memoria':
-                mem_path = os.path.join(DATA_DIR, 'ai_config', 'user-memory.md')
+                mem_path = os.path.join(DATA_DIR, 'ai_config', 'user-memoria.md')
                 if os.path.exists(mem_path):
                     with open(mem_path, 'r', encoding='utf-8') as f: data = f.read()
                     self.send_response(200); self.send_header('Content-type', 'text/plain; charset=utf-8'); self.end_headers()
                     self.wfile.write(data.encode('utf-8'))
                 else: self.send_response(404); self.end_headers(); self.wfile.write(b'day memory not found')
             elif self.path == '/api/memory/weekly':
-                # Sempre regenera — chamado 1×/semana pelo n8n. Custo: 1 call DeepSeek.
+                # Regenerates on each call (1 LLM request); falls back to the cached
+                # weekly_digest.json when no LLM is configured or generation fails.
+                digest = None
                 try:
-                    import weekly_distiller, importlib
-                    importlib.reload(weekly_distiller)
-                    digest = weekly_distiller.generate_weekly_digest()
-                    if digest:
-                        self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
-                        self.wfile.write(json.dumps(digest, ensure_ascii=False).encode('utf-8'))
-                    else:
-                        self.send_response(500); self.end_headers()
-                        self.wfile.write(b'{"error": "weekly digest generation failed"}')
+                    import weekly_digest, importlib
+                    importlib.reload(weekly_digest)
+                    digest = weekly_digest.generate_weekly_digest()
                 except Exception as e:
+                    print(f'[Weekly] generation error: {e}', flush=True)
+                if not digest:
+                    cached = os.path.join(DATA_DIR, 'weekly_digest.json')
+                    if os.path.exists(cached):
+                        with open(cached, 'r', encoding='utf-8') as f:
+                            digest = json.load(f)
+                if digest:
+                    self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
+                    self.wfile.write(json.dumps(digest, ensure_ascii=False).encode('utf-8'))
+                else:
                     self.send_response(500); self.end_headers()
-                    self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
+                    self.wfile.write(b'{"error": "weekly digest generation failed and no cache exists"}')
             elif self.path == '/api/search/status':
                 status = {
                     'bm25_ready': BM25_INDEX is not None and len(BM25_CHUNK_PARENTS) > 0,
@@ -1011,7 +1017,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                     'embed_count': len(EMBED_INDEX),
                     'total_chats': len(CHAT_INDEX),
                     'embed_provider': 'gemini' if GEMINI_API_KEY else 'none',
-                    'rerank': RERANK_MODEL if OPENAI_API_KEY else 'off',
+                    'rerank': RERANK_MODEL if OPENAI_ENABLED else 'off',
                 }
                 self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
                 self.wfile.write(json.dumps(status).encode('utf-8'))
