@@ -17,11 +17,11 @@ and confusing the two leads to wrong conclusions about what the assistant knows.
  your CLIs and browsers                      one process, once a day
  ────────────────────────                    ─────────────────────────
  claude / gemini / codex  ──┐
- ChatGPT web              ──┤   sync    ┌─> daily_auditor.py ──> daily_audit.json   (30 days, 1 entry/day)
- Gemini web               ──┼─ every ──>│         │
- Claude web               ──┘  5 min    │         ├─> generate_user_memory() ──> user-memory.md   (~700 tokens, 30d window)
-                                        │         └─> generate_user_core()   ──> user-core.md     (stable facts, decays only by contradiction)
-                                        │
+ Claude web               ──┤   sync    ┌─> daily_auditor.py ──> daily_audit.json   (30 days, 1 entry/day)
+                            ├─ every ──>│         │
+ ChatGPT web ─┐  indexed    │  5 min    │         ├─> generate_user_memory() ──> user-memory.md   (~700 tokens, 30d window)
+ Gemini web  ─┴─ but not ───┘           │         └─> generate_user_core()   ──> user-core.md     (stable facts, decays only by contradiction)
+                 audited                │
                                         └─> memory_distiller.py ──> memory_profile.json  (therapy-session profile)
                                                                           │
                                             (summary line feeds the memory prompt above)
@@ -56,18 +56,30 @@ misunderstood thing about the system:
 | `gemini` (CLI) | yes | yes | yes |
 | `claude_converted` (CLI) | yes | yes | yes |
 | `codex` (CLI) | yes | yes | **no** |
+| `claude_site` (web) | yes | yes | **no** |
 | `chatgpt_site` (web) | yes | **no** | **no** |
 | `gemini_site` (web) | yes | **no** | **no** |
-| `claude_site` (web) | yes | **no** | **no** |
 
-So: a conversation you had in a browser is findable forever, but the assistant will
-never spontaneously remember it. If you want something to reach memory, have that
-conversation in a CLI.
+Web sources are excluded from memory by default, and the reason is **date quality**,
+not principle. Only include a web source whose sync recovers the conversation's real
+creation date:
 
-The therapy profile has a second, sharper limit: `memory_distiller.py` buckets
-activations by `source`, and only `gemini` and `claude` have buckets. A session run
-through any other agent runner is invisible to it — the activation is logged, the
-session is searchable, and the profile silently never updates.
+- `claude_site` **is** included: its sync reads the conversation's `created_at` from
+  the authenticated API, so days land correctly.
+- `gemini_site` is **not**: 141 of its 199 conversations carry the sentinel date
+  `2025-12-31` and the rest carry the import date. Those dates are wrong in the
+  timeline too, not just in memory — fix the sync before wiring it in.
+- `chatgpt_site` has usable dates but is excluded by choice; the source is being
+  retired.
+
+Note that a web source's per-message `timestamp` is a capture stamp, constant across
+the whole conversation — only `startTime` is meaningful, so day membership for these
+is decided at conversation granularity.
+
+The therapy profile is stricter still: `memory_distiller.py` buckets activations by
+`source`, and only `gemini` and `claude` have buckets. A session run through any other
+agent runner is invisible to it — the activation is logged, the session is searchable,
+and the profile silently never updates.
 
 ---
 

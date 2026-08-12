@@ -17,6 +17,11 @@ BRT = timezone(timedelta(hours=-3))
 GEMINI_DIR = os.path.join(DATA_DIR, "gemini")
 CLAUDE_DIR = os.path.join(DATA_DIR, "claude_converted")
 CODEX_DIR = os.path.join(DATA_DIR, "codex")
+# Claude Web. É a ÚNICA fonte web que entra na memória: o sync dela usa o
+# `created_at` real da conversa. O gemini_site fica de fora porque 141 das suas 199
+# conversas têm data-sentinela 2025-12-31, e o chatgpt_site por decisão do usuário
+# (fonte em desuso). Ver docs/MEMORY-PIPELINE.md.
+CLAUDE_SITE_DIR = os.path.join(DATA_DIR, "claude_site")
 OUTPUT_FILE = os.path.join(DATA_DIR, "daily_audit.json")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -130,6 +135,23 @@ def get_todays_chats(target_str=None):
                 if messages and touched(messages):
                     chats.append({"uid": uid, "source": "codex", "messages": messages})
             except: continue
+
+    # Busca em Claude Web. O uid replica o do indexador (`claude-web-<rel>` com os
+    # separadores virados em `__`), senão o drill-down da auditoria não acha o chat.
+    if os.path.isdir(CLAUDE_SITE_DIR):
+        for f in glob.glob(os.path.join(CLAUDE_SITE_DIR, "**", "*.json"), recursive=True):
+            if maybe(f):
+                try:
+                    rel_name = os.path.relpath(f, CLAUDE_SITE_DIR).replace(os.sep, "__")
+                    uid = f"claude-web-{rel_name}"
+                    with open(f, 'r', encoding='utf-8') as j:
+                        data = json.load(j)
+                        msgs = data.get("messages", [])
+                        # Aqui o startTime é o critério bom: o timestamp por mensagem
+                        # é constante (carimbo da captura), não cronologia real.
+                        if _brt_date(data.get("startTime")) == today_str or touched(msgs):
+                            chats.append({"uid": uid, "source": "claude-web", "messages": msgs})
+                except: continue
 
     return chats
 
