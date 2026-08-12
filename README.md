@@ -101,6 +101,13 @@ cockpit/
 └── requirements.txt
 ```
 
+## The memory loop
+
+Cockpit does not just archive your AI sessions — it distills them daily and injects the
+result back into the next session's system prompt. That loop, which sources feed it (not
+all of them do), how a pending item is allowed to die, and why sampling the middle of a
+chat matters are documented in **[docs/MEMORY-PIPELINE.md](docs/MEMORY-PIPELINE.md)**.
+
 ## Quick Start
 
 ### 1. Run the server

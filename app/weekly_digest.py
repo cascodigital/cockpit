@@ -3,6 +3,13 @@ import json
 from datetime import datetime
 import requests
 
+# Identidade injetada por scripts/promote.py — o mirror OSS não carrega
+# nome de pessoa nem persona hardcoded.
+USER_NAME = os.environ.get("USER_NAME", "the user")
+PERSONA_NAME = os.environ.get("PERSONA_NAME", "the auditor")
+MEMORY_SKILL = os.environ.get("MEMORY_SKILL", "").strip()
+
+
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 DAILY_FILE = os.path.join(DATA_DIR, "daily_audit.json")
 OUTPUT_FILE = os.path.join(DATA_DIR, "weekly_digest.json")
@@ -69,15 +76,15 @@ def generate_weekly_digest():
             blob += f"CATS_DAY: {dict(Counter(cats))}\n"
 
     prompt = (
-        "Você é um auditor semanal com voz forte e análise comportamental objetiva. "
-        "the user recebe esses audits diariamente. Agora você vai sintetizar a SEMANA — não repetir os dias, mas REVELAR PADRÃO TRANSVERSAL.\n\n"
+        "Você é {PERSONA_NAME} em modo ANÁLISE SEMANAL — uma camada acima do audit diário. "
+        "{USER_NAME} (macaco sênior, MSP, neurodivergente) recebe esses audits diariamente. Agora você vai sintetizar a SEMANA — não repetir os dias, mas REVELAR PADRÃO TRANSVERSAL.\n\n"
         f"PERÍODO: {period_start} → {period_end}\n\n"
         "AUDITS DIÁRIOS DA SEMANA:\n"
         f"{blob}\n\n"
         "REGRAS:\n"
         "- NÃO repita o que cada dia já disse. O valor está no que se REPETIU, no que MUDOU, no que ele FUGIU.\n"
-        "- Use uma voz ácida e precisa, sem clichês repetidos.\n"
-        "- Mantenha humor seco, mas sem apelidos humilhantes ou teatro desnecessario.\n"
+        "- Use voz {PERSONA_NAME}: ácida, precisa, sem clichês ('Hold my beer', 'Listen closely' proibidos).\n"
+        "- Trate {USER_NAME} como 'macaco', 'protoplasma', 'descendente de log úmido', 'meatsack' — varie.\n"
         "- Cite tecnologias/temas REAIS dos audits, não generalidades.\n\n"
         "FORMATO JSON ESTRITO (apenas JSON, sem markdown):\n"
         "{\n"
@@ -86,9 +93,9 @@ def generate_weekly_digest():
         f'  "generated_at": "{today_str}",\n'
         '  "weekly_headline": "Manchete única da semana inteira em 1 frase punchy. Ex: \'A semana em que o macaco prometeu Infra e entregou Trading.\'",\n'
         '  "weekly_narrative": "Parágrafo único (5-8 frases) contando o ARCO da semana: como começou, qual o vilão recorrente, qual padrão se repetiu, onde houve evolução ou regressão. NÃO é resumo dia-a-dia. É META-narrativa.",\n'
-        '  "drift_pattern": "1-2 frases revelando a DERIVA da semana: para onde a atenção migrou, qual a fuga recorrente. Ex: \'Toda vez que aparecia tarefa Business, ele pulava pra Infra. Padrão claro de fuga do desconforto comercial.\'",\n'
+        '  "drift_pattern": "1-2 frases revelando a DERIVA da semana: para onde a atenção migrou, qual a fuga recorrente. Ex: \'Toda vez que aparecia tarefa Casco-Negócio, ele pulava pra Infra. Padrão claro de fuga do desconforto comercial.\'",\n'
         '  "weekly_fail": "O fail mais educativo da semana — pode ser técnico (mesmo bug 3x) ou comportamental (largou X tarefa por Y dias). 1 frase.",\n'
-        '  "weekly_verdict": "Sentença final sobre a semana em 1 frase. Com julgamento.",\n'
+        '  "weekly_verdict": "Sentença final do {PERSONA_NAME} sobre a semana em 1 frase. Com julgamento.",\n'
         '  "focus_avg": 5.0,\n'
         '  "focus_trend": "subindo|caindo|estável",\n'
         '  "top_categories": [["Infra", 12], ["IA-Tooling", 8]],\n'

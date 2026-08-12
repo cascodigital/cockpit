@@ -4,6 +4,13 @@ import glob
 from datetime import datetime, timezone, timedelta
 import requests
 
+# Identidade injetada por scripts/promote.py — o mirror OSS não carrega
+# nome de pessoa nem persona hardcoded.
+USER_NAME = os.environ.get("USER_NAME", "the user")
+PERSONA_NAME = os.environ.get("PERSONA_NAME", "the auditor")
+MEMORY_SKILL = os.environ.get("MEMORY_SKILL", "").strip()
+
+
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 GEMINI_DIR = os.path.join(DATA_DIR, "gemini")
 CLAUDE_DIR = os.path.join(DATA_DIR, "claude_converted")
@@ -13,9 +20,9 @@ SKILL_LOG_PATH = os.path.join(DATA_DIR, "skill_log.jsonl")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 
-# Skill whose sessions feed the memory profile (matched against skill_log
-# activations by time window). Empty = distiller disabled.
-MEMORY_SKILL = os.environ.get("MEMORY_SKILL", "").strip()
+# Legado: matching por keyword no blob inteiro caçava o registry de skills (94 falsos p/ "skpsi").
+# Verdade-terra agora é o skill_log (ativações REAIS do skpsi). Mantido só p/ referência.
+LUDOVICO_KEYWORDS = ["skpsi", "leto ii", "ludovico von drake"]
 BRT = timezone(timedelta(hours=-3))
 
 def load_existing_dna():
@@ -129,8 +136,8 @@ def build_prompt(chats, existing_dna):
     existing_hw = json.dumps(existing_dna.get("pending_homework", []), ensure_ascii=False)
 
     return (
-        "Voce e um destilador de memoria para sessoes de coaching e reflexao.\n"
-        "The user is a senior engineer.\n\n"
+        "Voce e o Arquiteto de Memoria do Prof. MemoryProfile Von Drake (psicologo TCC do Andre).\n"
+        "Andre e Engenheiro MSP Senior, neurodivergente (Asperger), hipercritico, pessimista treinado.\n\n"
         "LOGS DA SESSAO PARA ANALISE:\n"
         f"{full_text[:25000]}\n\n"
         "BUGS COGNITIVOS JA REGISTRADOS (nao repetir, apenas complementar se houver novos):\n"
@@ -147,7 +154,7 @@ def build_prompt(chats, existing_dna):
         "(APENAS tarefas de vida/comportamento, NUNCA ferramentas tecnicas, CLIs ou configuracoes). "
         "Se nenhum novo homework foi definido, retorne lista vazia [].\n"
         "4. session_summary: resumo em 3-5 frases da sessao: temas abordados, bugs trabalhados, estado emocional do paciente, o que ficou pendente.\n"
-        "5. emotional_state: current emotional state of the user em uma frase curta.\n"
+        "5. emotional_state: estado emocional atual do Andre em uma frase curta.\n"
         "6. energy_level: nivel de energia atual em uma frase curta.\n"
         "Responda APENAS o JSON puro, sem markdown."
     )
@@ -175,9 +182,6 @@ def call_gemini(prompt_text):
     return r.json()["candidates"][0]["content"]["parts"][0]["text"]
 
 def distill_memory():
-    if not MEMORY_SKILL:
-        print("[MemoryProfile] MEMORY_SKILL not set - distiller disabled.")
-        return
     existing_dna = load_existing_dna()
     since_dt = get_last_updated(existing_dna)
 
