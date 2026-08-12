@@ -29,6 +29,13 @@ except ImportError:
 import memory_distiller
 import daily_auditor
 
+# Identidade injetada por scripts/promote.py — o mirror OSS não carrega
+# nome de pessoa nem persona hardcoded.
+USER_NAME = os.environ.get("USER_NAME", "the user")
+PERSONA_NAME = os.environ.get("PERSONA_NAME", "the auditor")
+MEMORY_SKILL = os.environ.get("MEMORY_SKILL", "").strip()
+
+
 # CONFIGURAÇÃO
 PORT = int(os.environ.get('PORT', 8000))
 GEMINI_BASE_DIR = os.environ.get('GEMINI_DATA', '/app/data/gemini')
@@ -38,43 +45,42 @@ CODEX_BASE_DIR = os.environ.get('CODEX_DATA', '/app/data/codex')
 CHATGPT_SITE_DIR = os.environ.get('CHATGPT_SITE_DATA', '/app/data/chatgpt_site')
 GEMINI_SITE_DIR = os.environ.get('GEMINI_SITE_DATA', '/app/data/gemini_site')
 CLAUDE_SITE_DIR = os.environ.get('CLAUDE_SITE_DATA', '/app/data/claude_site')
-DATA_DIR = os.environ.get('DATA_DIR', '/app/data')
-APP_VERSION = '8.5'
-INDEX_INTERVAL = int(os.environ.get('INDEX_INTERVAL', '150'))  # seconds between filesystem index scans
+DATA_DIR = '/app/data'
+APP_VERSION = '8.6'
 SKILL_LOG_PATH = os.path.join(DATA_DIR, 'skill_log.jsonl')
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')  # optional: enables LLM rerank + /api/ask
-# Any OpenAI-compatible server works (Ollama, LM Studio, vLLM...). Local servers need no key.
-OPENAI_BASE_URL = (os.environ.get('OPENAI_BASE_URL', '') or 'https://api.openai.com/v1').rstrip('/')
-OPENAI_ENABLED = bool(OPENAI_API_KEY or os.environ.get('OPENAI_BASE_URL'))
-RERANK_MODEL = os.environ.get('RERANK_MODEL', 'gpt-4o-mini')  # model for search reranking
-RERANK_TOP = int(os.environ.get('RERANK_TOP', '30'))  # how many candidates to rerank
-ASK_MODEL = os.environ.get('ASK_MODEL', 'gpt-4o-mini')  # model for /api/ask answers
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
+RERANK_MODEL = os.environ.get('RERANK_MODEL', 'gpt-4o-mini')  # v7.1 LLM reranker
+RERANK_TOP = int(os.environ.get('RERANK_TOP', '30'))  # how many candidates to rerank (full pool)
+ASK_MODEL = os.environ.get('ASK_MODEL', 'gpt-4o-mini')  # v8.3 /api/ask (Pergunte ao Panopticon)
 ASK_CHAR_BUDGET = int(os.environ.get('ASK_CHAR_BUDGET', '90000'))  # journal context cap (~27k tokens)
-ASK_RECENT_DAYS = int(os.environ.get('ASK_RECENT_DAYS', '5'))  # recent days always in /api/ask context
+ASK_RECENT_DAYS = int(os.environ.get('ASK_RECENT_DAYS', '5'))  # v8.4: dias recentes sempre no contexto
+INDEX_INTERVAL = int(os.environ.get('INDEX_INTERVAL', '150'))  # seconds between filesystem index scans
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 EMBED_DISABLED = False  # set True on first API failure
-EMBED_CAP_HIT = False  # set when the embeddings API returns 429 (quota/spending cap)
 EMBED_RUNNING = False  # prevent concurrent embed threads
+EMBED_CAP_HIT = False  # set when Gemini returns 429 spending-cap/quota
 SEARCH_INDEX_PATH = os.path.join(DATA_DIR, 'search_index.json')
-BRAIN_DIR = os.environ.get('BRAIN_DATA', '/app/data/brain')  # optional: distilled-notes vault with journal/*.md
+BRAIN_DIR = os.environ.get('BRAIN_DATA', '/app/data/brain')  # v7.3: second-brain vault (journal destilado)
 
 # Keep in sync with the skills that actually exist on disk (~/.claude/skills).
 # Stale entries here show wrong/empty badges in the sidebar and a dead option in
-# the skill filter. Last reconciled 2026-06-18.
+# the skill filter. Last reconciled 2026-07-18 (add skcra, skmt5).
 SKILLS_MAP = {
     'skacoes':     {'icon': '📈', 'name': 'Trading'},
     'skadv':       {'icon': '⚖️', 'name': 'Advogado'},
     'skcnpj':      {'icon': '🤝', 'name': 'Saul'},
     'skcoz':       {'icon': '🍳', 'name': 'Cozinha'},
+    'skcra':       {'icon': '🏗️', 'name': 'Crane'},
     'skcpf':       {'icon': '💼', 'name': 'Carreira'},
     'skcreator':   {'icon': '🏗️', 'name': 'Creator'},
     'skeng':       {'icon': '🇬🇧', 'name': 'English'},
     'skhumanizer': {'icon': '✍️', 'name': 'Humanizer'},
-    'skippy':      {'icon': '🍺', 'name': 'Skippy'},
+    'skippy':      {'icon': '🍺', 'name': '{PERSONA_NAME}'},
     'skmcp':       {'icon': '🔌', 'name': 'MCP'},
     'skmed':       {'icon': '💊', 'name': 'Hans'},
+    'skmt5':       {'icon': '💹', 'name': 'MT5'},
     'skprompt':    {'icon': '✨', 'name': 'Prompt'},
-    'skpsi':       {'icon': '🧬', 'name': 'Skippy Psi'},
+    'skpsi':       {'icon': '🧬', 'name': '{PERSONA_NAME} Psi'},
     'skrelatorio': {'icon': '📊', 'name': 'Relatorio'},
     'skresume':    {'icon': '🧾', 'name': 'Resume'},
     'skrolo':      {'icon': '🎵', 'name': 'Rolo'},
@@ -88,8 +94,8 @@ CHAT_MESSAGES = {}
 SKILL_LOG = []
 BM25_INDEX = None
 BM25_UIDS = []
-BM25_CHUNK_PARENTS = []  # parent uid per BM25 chunk (chunk-level index)
-BM25_CHUNK_TEXTS = []  # raw text per chunk (for best-chunk snippet / rerank input)
+BM25_CHUNK_PARENTS = []  # v7.0: parent uid per BM25 chunk (chunk-level index)
+BM25_CHUNK_TEXTS = []  # v7.1: raw text per chunk (for best-chunk snippet/rerank input)
 EMBED_INDEX = {}
 SEARCH_LOCK = threading.Lock()
 
@@ -233,6 +239,7 @@ def convert_codex_log(jsonl_path):
     messages = []
     session_id = os.path.basename(jsonl_path).replace('.jsonl', '')
     start_ts = None
+    last_activity_ts = None
     try:
         with open(jsonl_path, 'r', encoding='utf-8') as f:
             for line in f:
@@ -247,8 +254,11 @@ def convert_codex_log(jsonl_path):
                 ts = entry.get('timestamp')
                 if entry.get('type') == 'session_meta':
                     payload = entry.get('payload', {})
-                    session_id = payload.get('id', session_id)
-                    start_ts = payload.get('timestamp') or ts or start_ts
+                    # Sub-agent rollouts may embed the parent's session_meta after
+                    # their own. The first metadata block belongs to this file.
+                    if start_ts is None:
+                        session_id = payload.get('id', session_id)
+                        start_ts = payload.get('timestamp') or ts
                     continue
 
                 if entry.get('type') != 'response_item':
@@ -273,13 +283,20 @@ def convert_codex_log(jsonl_path):
                     'content': content,
                     'timestamp': ts
                 })
+                if ts:
+                    last_activity_ts = ts
                 if not start_ts:
                     start_ts = ts
     except:
         return None
     if not messages:
         return None
-    return {'sessionId': session_id, 'startTime': start_ts or messages[0]['timestamp'], 'messages': messages}
+    return {
+        'sessionId': session_id,
+        'startTime': start_ts or messages[0]['timestamp'],
+        'lastActivity': last_activity_ts or start_ts or messages[-1]['timestamp'],
+        'messages': messages,
+    }
 
 def sync_claude():
     if not os.path.exists(CLAUDE_PROJECTS_DIR): return
@@ -330,8 +347,9 @@ def strip_accents(text):
 def tokenize(text):
     return re.findall(r'\w+', strip_accents(text.lower()))
 
-# Caps high enough to index topics buried deep in long mixed-topic chats. With the old
-# 8000-char cap, a topic discussed at char ~56k of an 80k chat was never indexed at all.
+# v7.0: caps raised so topics buried deep in long mixed-topic chats get indexed.
+# Old caps (400/msg, 8000/chat) dropped content past ~8k chars — e.g. an "admin local"
+# discussion at char 56k in an 81k chat was invisible to BM25. See cockpit.md v7.0.
 MSG_CAP = 4000
 CHAT_CAP = 120000
 
@@ -366,9 +384,9 @@ def get_snippet(text, query_terms, context=220):
     return prefix + text[start:end] + suffix
 
 def chunk_text(text, size=1500, overlap=250):
-    """Split text into overlapping windows. Chunk-level BM25 lets a topic buried in a long
-    mixed-topic chat rank on the dense chunk that contains it, instead of being washed out
-    by Okapi BM25 length-normalization over the whole multi-thousand-char blob."""
+    """Split text into overlapping windows. v7.0: chunk-level BM25 so a topic buried
+    in a long mixed-topic chat ranks on the dense chunk that contains it, instead of
+    being washed out by Okapi BM25 length-normalization over the whole 80k-char blob."""
     if not text:
         return []
     chunks = []
@@ -390,7 +408,7 @@ def build_bm25_index():
     for uid in uids:
         for ch in chunk_text(get_chat_text(uid)):
             toks = tokenize(ch)
-            if not toks:  # all-symbol chunk → skip (empty docs break BM25 scoring)
+            if not toks:  # all-stopword/symbol chunk → skip (keeps chunk↔parent alignment)
                 continue
             corpus.append(toks)
             chunk_parents.append(uid)
@@ -480,6 +498,10 @@ def _do_embed_index():
             embeddings = get_embeddings_batch(texts)
             if embeddings:
                 break
+            if EMBED_CAP_HIT:
+                print('[Embed] Spending cap reached - disabling embeddings until restart. BM25 still active.', flush=True)
+                EMBED_DISABLED = True
+                return
             wait = 5 * (attempt + 1)
             print(f'[Embed] Attempt {attempt+1} failed, retrying in {wait}s...', flush=True)
             time.sleep(wait)
@@ -491,10 +513,6 @@ def _do_embed_index():
             print(f'[Embed] Batch {i // batch_size + 1} done. Total: {len(EMBED_INDEX)}/{len(CHAT_INDEX)}', flush=True)
             time.sleep(1)
         else:
-            if EMBED_CAP_HIT:
-                print('[Embed] Spending cap reached - disabling embeddings until restart. BM25 still active.', flush=True)
-                EMBED_DISABLED = True
-                return
             consecutive_failures += 1
             print(f'[Embed] Batch {i // batch_size + 1} failed after 3 attempts. Pausing...', flush=True)
             if consecutive_failures >= 2:
@@ -511,28 +529,28 @@ def cosine_sim(a, b):
     return float(np.dot(a, b) / (norm_a * norm_b))
 
 def llm_rerank(query, candidates):
-    """Rerank top candidates by CONCEPTUAL relevance via an OpenAI-compatible API. Returns
-    a reordered candidate list, or None on failure (caller keeps original order). No-op
-    without an LLM configured, so the feature is fully optional."""
-    if not OPENAI_ENABLED or len(candidates) < 2:
+    """v7.1: rerank top BM25/semantic candidates by CONCEPTUAL relevance via OpenAI.
+    Returns reordered candidate list, or None on failure (caller keeps original order).
+    Degrades to no-op if OPENAI_API_KEY is absent — safe to deploy without the key."""
+    if not OPENAI_API_KEY or len(candidates) < 2:
         return None
     items = []
     for i, c in enumerate(candidates):
-        # Judge on the MATCHED chunk (snippet), not the whole-chat summary — the summary
+        # v7.1: judge on the MATCHED chunk (snippet), not the whole-chat summary — the summary
         # reflects a long chat's dominant topic and poisons ranking for buried-topic matches.
         ctx = (c.get('snippet') or c.get('summary') or '')[:600]
         items.append(f"[{i}] {ctx}")
     prompt = (
-        "You are a search reranker. Given the user QUERY and a list of conversation snippets "
-        "(each with an index), order the indices from MOST to LEAST relevant to the query's "
-        "intent. Prioritize relevance of CONCEPT/topic, not keyword overlap. "
-        'Reply with JSON only: {"order": [indices, most relevant first]}.\n\n'
-        f"QUERY: {query}\n\nSNIPPETS:\n" + "\n".join(items)
+        "Você é um reranker de busca. Dada a CONSULTA do usuário e uma lista de trechos de "
+        "conversas (cada um com um índice), ordene os índices do MAIS ao MENOS relevante para a "
+        "intenção da consulta. Priorize relevância de CONCEITO/assunto, não coincidência de palavras. "
+        'Responda SÓ JSON: {"order": [índices em ordem decrescente de relevância]}.\n\n'
+        f"CONSULTA: {query}\n\nTRECHOS:\n" + "\n".join(items)
     )
     try:
         r = requests.post(
-            f'{OPENAI_BASE_URL}/chat/completions',
-            headers={'Authorization': f'Bearer {OPENAI_API_KEY}'} if OPENAI_API_KEY else {},
+            'https://api.openai.com/v1/chat/completions',
+            headers={'Authorization': f'Bearer {OPENAI_API_KEY}'},
             json={'model': RERANK_MODEL,
                   'messages': [{'role': 'user', 'content': prompt}],
                   'temperature': 0,
@@ -544,7 +562,7 @@ def llm_rerank(query, candidates):
         for idx in order:
             if isinstance(idx, int) and 0 <= idx < len(candidates) and idx not in seen:
                 seen.add(idx); result.append(candidates[idx])
-        for i in range(len(candidates)):  # append any the model dropped, preserving order
+        for i in range(len(candidates)):  # append any the model dropped, preserving BM25 order
             if i not in seen:
                 result.append(candidates[i])
         return result
@@ -553,8 +571,7 @@ def llm_rerank(query, candidates):
         return None
 
 def list_journal():
-    """Journal files from the BRAIN_DATA vault, newest first. Optional feature:
-    returns [] when the directory does not exist."""
+    """v7.3: arquivos do journal do second brain, mais recentes primeiro."""
     out = []
     jdir = os.path.join(BRAIN_DIR, 'journal')
     if not os.path.isdir(jdir):
@@ -568,12 +585,12 @@ def list_journal():
     return out
 
 def search_journal(query, limit=8):
-    """Match query terms against the distilled '- ' bullets of the journal."""
-    terms = [t for t in tokenize(query) if len(t) >= 3]  # drop short filler (a, of, to...)
+    """v7.3: casa termos da query com bullets destilados do journal."""
+    terms = [t for t in tokenize(query) if len(t) >= 3]  # ignora filler curto (a, da, de...)
     if not terms:
         return []
-    # Natural questions carry filler words ("how did the...") that never appear in the
-    # journal: require only 1/3 of the terms and rank by score — small corpus, low noise.
+    # perguntas naturais trazem filler ("como ficou...") que nunca esta no journal:
+    # exigir so 1/3 dos termos e ranquear por score — corpus pequeno, ruido baixo
     need = max(1, len(terms) // 3)
     hits = []
     for day in list_journal():
@@ -593,16 +610,16 @@ def search_journal(query, limit=8):
     return [{'date': h['date'], 'section': h['section'], 'text': h['text']} for h in hits[:limit]]
 
 def ask_panopticon(question):
-    """Answer a natural-language question using the journal as context (LLM required).
-    RAG-lite selection: the ASK_RECENT_DAYS newest days always enter; older days enter
-    only if they match the question's terms (distinct-term score, same criterion as
-    search_journal). Budget priority: recent first, then matches by score. Scales to
-    years of journal without blowing the context window or diluting attention."""
-    if not OPENAI_ENABLED:
-        return {'error': 'no LLM configured - set OPENAI_API_KEY or OPENAI_BASE_URL'}
-    days = list_journal()  # newest first
+    """v8.4: responde pergunta em linguagem natural usando o journal como contexto (gpt-4o-mini).
+    Selecao RAG-lite: os ASK_RECENT_DAYS mais recentes entram sempre; dias antigos so entram
+    se casarem com termos da pergunta (score de termos distintos, mesmo criterio do
+    search_journal). Prioridade no budget: recentes primeiro, depois casados por score.
+    Escala pra journal de anos sem estourar janela nem diluir a atencao do modelo."""
+    if not OPENAI_API_KEY:
+        return {'error': 'OPENAI_API_KEY ausente no container'}
+    days = list_journal()  # ja vem mais recente primeiro
     if not days:
-        return {'error': 'journal empty or unreachable (BRAIN_DATA)'}
+        return {'error': 'journal vazio ou inacessivel'}
     terms = [t for t in tokenize(question) if len(t) >= 3]
     need = max(1, len(terms) // 3)
     recent = days[:ASK_RECENT_DAYS]
@@ -614,35 +631,35 @@ def ask_panopticon(question):
             matched.append((score, day))
     matched.sort(key=lambda x: (x[0], x[1]['date']), reverse=True)
     picked, total = {}, 0
-    for day in recent + [d for _, d in matched]:  # order = budget priority
+    for day in recent + [d for _, d in matched]:  # ordem = prioridade no budget
         block = f"### {day['date']}\n{day['content'].strip()}"
         if total + len(block) > ASK_CHAR_BUDGET and picked:
-            continue  # day didn't fit; smaller later days may still fit
+            continue  # dia nao coube; dias menores seguintes ainda podem caber
         picked[day['date']] = block
         total += len(block)
     used_dates = sorted(picked, reverse=True)
-    ctx_parts = [picked[d] for d in used_dates]  # prompt always chronological (newest first)
+    ctx_parts = [picked[d] for d in used_dates]  # prompt sempre cronologico (recente primeiro)
     system = (
-        "You are the Panopticon, the user's distilled long-term memory (a daily journal). "
-        "Answer the question using ONLY the journal below. Rules: "
-        "1) Always cite the date(s) (YYYY-MM-DD) of the entries that support the answer. "
-        "2) The journal is ordered newest to oldest; when days conflict, the most recent wins. "
-        "3) Struck-through items (~~text~~) are OUTDATED - ignore their content, but you may say they were revoked. "
-        "4) If the journal does not cover the question, say so clearly instead of inventing. "
-        "5) The context holds only recent days plus days relevant to the question; date gaps "
-        "are normal - a missing day does not mean nothing happened. "
-        "Answer in the language of the question, direct, in markdown."
+        "Você é o Panopticon, a memória de longo prazo destilada do {USER_NAME} (journal do second brain). "
+        "Responda a pergunta usando EXCLUSIVAMENTE o journal abaixo. Regras: "
+        "1) Sempre cite a(s) data(s) (AAAA-MM-DD) dos itens que fundamentam a resposta. "
+        "2) O journal é ordenado do dia mais recente pro mais antigo; em conflito entre dias, o mais recente vale. "
+        "3) Itens riscados (~~texto~~) estão DESATUALIZADOS — ignore o conteúdo, mas pode citar que foi revogado. "
+        "4) Se o journal não cobre a pergunta, diga isso claramente em vez de inventar. "
+        "5) O contexto traz só os dias recentes + os dias relevantes à pergunta; pode haver "
+        "lacunas de datas — ausência de um dia não significa que nada aconteceu nele. "
+        "Responda em português, direto, em markdown."
     )
     try:
         r = requests.post(
-            f'{OPENAI_BASE_URL}/chat/completions',
-            headers={'Authorization': f'Bearer {OPENAI_API_KEY}'} if OPENAI_API_KEY else {},
+            'https://api.openai.com/v1/chat/completions',
+            headers={'Authorization': f'Bearer {OPENAI_API_KEY}'},
             json={'model': ASK_MODEL,
                   'messages': [{'role': 'system', 'content': system},
                                {'role': 'user', 'content': "JOURNAL:\n\n" + "\n\n".join(ctx_parts)
-                                + f"\n\nQUESTION: {question}"}],
+                                + f"\n\nPERGUNTA: {question}"}],
                   'temperature': 0.2},
-            timeout=120,
+            timeout=60,
         )
         answer = r.json()['choices'][0]['message']['content']
         return {'answer': answer, 'sources': used_dates, 'model': ASK_MODEL}
@@ -651,7 +668,7 @@ def ask_panopticon(question):
         return {'error': str(e)}
 
 def hybrid_search(query, top_k=30):
-    """RRF fusion of BM25 + semantic embeddings, with optional LLM reranking."""
+    """RRF fusion of BM25 + semantic embeddings."""
     query_terms = tokenize(query)
     rrf_scores = {}
     K = 60  # RRF constant
@@ -694,7 +711,7 @@ def hybrid_search(query, top_k=30):
         chat = chat_map.get(uid)
         if not chat:
             continue
-        if uid in best_chunk_text:  # snippet from the best-matching chunk (dense relevant part)
+        if uid in best_chunk_text:  # v7.1: snippet from the best-matching chunk (dense relevant part)
             snippet = get_snippet(best_chunk_text[uid], query_terms)
         else:
             snippet = get_snippet(get_chat_text(uid), query_terms)
@@ -711,9 +728,10 @@ def hybrid_search(query, top_k=30):
             'summary': chat.get('summary', ''),
         })
 
-    # Optional LLM rerank of the top candidates by conceptual relevance (no-op without key)
+    # v7.1: LLM rerank the top candidates by conceptual relevance (no-op without OPENAI_API_KEY)
     if OPENAI_API_KEY and len(output) > 1:
-        reranked = llm_rerank(query, output[:RERANK_TOP])
+        head = output[:RERANK_TOP]
+        reranked = llm_rerank(query, head)
         if reranked:
             output = reranked + output[RERANK_TOP:]
     return output
@@ -724,6 +742,7 @@ def index_worker():
     global CHAT_INDEX, CHAT_MESSAGES
     file_metadata = {}
     last_distill_date = None
+    last_ludovico_date = None
     while True:
         try:
             sync_claude()
@@ -796,7 +815,8 @@ def index_worker():
                         if data:
                             sid = data.get("sessionId", fname.replace(".jsonl", ""))
                             start_raw = data.get('startTime', mtime)
-                            date_str, raw_ts = format_date(start_raw)
+                            activity_raw = data.get('lastActivity', start_raw)
+                            date_str, raw_ts = format_date(activity_raw)
                             machine = 'DKR' if 'docker' in f.lower() else ('WIN' if 'windows' in f.lower() else 'LNX')
                             CHAT_MESSAGES[uid] = {"msgs": data.get('messages', []), "sid": sid, "machine": machine, "source": "codex", "date": date_str, "raw_date": raw_ts, "start_raw": start_raw}
                             file_metadata[uid] = mtime
@@ -865,6 +885,9 @@ def index_worker():
                                 sid = data.get("sessionId") or fname.replace(".json", "")
                                 start_raw = data.get('startTime') or data.get('capturedAt') or mtime
                                 date_str, raw_ts = format_date(start_raw)
+                                summary = data.get('summary') or get_summary(proc, 'gemini')
+                                if data.get('title') and summary == get_summary(proc, 'gemini'):
+                                    summary = data.get('title')
                                 CHAT_MESSAGES[uid] = {"msgs": proc, "sid": sid, "machine": "WEB", "source": "gemini", "date": date_str, "raw_date": raw_ts, "start_raw": start_raw, "url": data.get("url", ""), "title": data.get("title", "")}
                                 file_metadata[uid] = mtime
                                 something_changed = True
@@ -922,21 +945,18 @@ def index_worker():
         now = datetime.now()
         if now.hour == 23 and now.minute >= 45 and last_distill_date != now.date():
             last_distill_date = now.date()
-            # Atualiza o memory profile primeiro para a memória diária já ler o estado mais recente.
+            # Prontuário psicológico PRIMEIRO: assim a memória do dia já lê o ludovico_dna fresco
+            # (terapia do dia entra na injeção do skippy na mesma noite, sem lag de 1 ciclo).
             try:
                 import importlib
                 importlib.reload(memory_distiller)
                 memory_distiller.distill_memory()
-                print(f'[{now}] [MemoryProfile] Updated.')
+                print(f'[{now}] [MemoryProfile] Prontuário updated.')
             except Exception as e:
                 print(f'[{now}] [MemoryProfile] Error: {e}')
-            try:
-                import importlib
-                importlib.reload(daily_auditor)
-                daily_auditor.generate_daily_audit()
-                print(f'[{now}] [Daily Audit] Updated.')
-            except Exception as e:
-                print(f'[{now}] [Daily Audit] Error: {e}')
+            # [Daily Audit] movido para n8n (workflow 03:05: docker exec cockpit
+            # python /app/daily_auditor.py <ontem>). Gatilho interno das 23:45
+            # desativado p/ fonte unica + catch-up por data. -- {PERSONA_NAME} 2026-07-22
         time.sleep(INDEX_INTERVAL)
 
 # ─── HTTP HANDLER ────────────────────────────────────────────────────────────
@@ -959,7 +979,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                 data = CHAT_MESSAGES.get(uid, {"msgs":[]})
                 self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
                 self.wfile.write(json.dumps(data).encode('utf-8'))
-            elif self.path == '/api/memory/profile':
+            elif self.path == '/api/memory/ludovico':
                 dna_path = os.path.join(DATA_DIR, 'memory_profile.json')
                 if os.path.exists(dna_path):
                     with open(dna_path, 'r', encoding='utf-8') as f: data = f.read()
@@ -981,33 +1001,27 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                     self.wfile.write(data.encode('utf-8'))
                 else: self.send_response(404); self.end_headers(); self.wfile.write(b'core memory not found')
             elif self.path == '/api/memory/memoria':
-                mem_path = os.path.join(DATA_DIR, 'ai_config', 'user-memoria.md')
+                mem_path = os.path.join(DATA_DIR, 'ai_config', 'user-memory.md')
                 if os.path.exists(mem_path):
                     with open(mem_path, 'r', encoding='utf-8') as f: data = f.read()
                     self.send_response(200); self.send_header('Content-type', 'text/plain; charset=utf-8'); self.end_headers()
                     self.wfile.write(data.encode('utf-8'))
                 else: self.send_response(404); self.end_headers(); self.wfile.write(b'day memory not found')
             elif self.path == '/api/memory/weekly':
-                # Regenerates on each call (1 LLM request); falls back to the cached
-                # weekly_digest.json when no LLM is configured or generation fails.
-                digest = None
+                # Sempre regenera — chamado 1×/semana pelo n8n. Custo: 1 call DeepSeek.
                 try:
                     import weekly_digest, importlib
                     importlib.reload(weekly_digest)
                     digest = weekly_digest.generate_weekly_digest()
+                    if digest:
+                        self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
+                        self.wfile.write(json.dumps(digest, ensure_ascii=False).encode('utf-8'))
+                    else:
+                        self.send_response(500); self.end_headers()
+                        self.wfile.write(b'{"error": "weekly digest generation failed"}')
                 except Exception as e:
-                    print(f'[Weekly] generation error: {e}', flush=True)
-                if not digest:
-                    cached = os.path.join(DATA_DIR, 'weekly_digest.json')
-                    if os.path.exists(cached):
-                        with open(cached, 'r', encoding='utf-8') as f:
-                            digest = json.load(f)
-                if digest:
-                    self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
-                    self.wfile.write(json.dumps(digest, ensure_ascii=False).encode('utf-8'))
-                else:
                     self.send_response(500); self.end_headers()
-                    self.wfile.write(b'{"error": "weekly digest generation failed and no cache exists"}')
+                    self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
             elif self.path == '/api/search/status':
                 status = {
                     'bm25_ready': BM25_INDEX is not None and len(BM25_CHUNK_PARENTS) > 0,
@@ -1017,7 +1031,6 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                     'embed_count': len(EMBED_INDEX),
                     'total_chats': len(CHAT_INDEX),
                     'embed_provider': 'gemini' if GEMINI_API_KEY else 'none',
-                    'rerank': RERANK_MODEL if OPENAI_ENABLED else 'off',
                 }
                 self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
                 self.wfile.write(json.dumps(status).encode('utf-8'))
@@ -1056,8 +1069,8 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                 if not query:
                     self.send_response(400); self.end_headers(); self.wfile.write(b'{"error": "no query"}')
                     return
-                # {results, journal}: chat hits plus matching distilled-journal bullets
-                payload = {'results': hybrid_search(query), 'journal': search_journal(query)}
+                results = hybrid_search(query)
+                payload = {'results': results, 'journal': search_journal(query)}  # v7.3
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
@@ -1065,7 +1078,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(json.dumps(payload).encode('utf-8'))
 
             elif self.path == '/api/ask':
-                # Ask the Panopticon: journal as context, LLM answers with cited dates
+                # v8.3: Pergunte ao Panopticon — journal como contexto, gpt-4o-mini responde
                 content_length = int(self.headers.get('Content-Length', 0))
                 body = self.rfile.read(content_length).decode('utf-8')
                 data = json.loads(body)
@@ -1094,16 +1107,14 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
 
     def generate_html(self):
         opts = ''.join([f'<option value="{k}">{v["icon"]} {v["name"]}</option>' for k, v in SKILLS_MAP.items()])
-        return (self.get_template().replace('{{OPTS}}', opts)
-                .replace('{{META_JSON}}', json.dumps(SKILLS_MAP))
-                .replace('{{ASK_ENABLED}}', 'true' if OPENAI_ENABLED else 'false'))
+        return self.get_template().replace('{{OPTS}}', opts).replace('{{META_JSON}}', json.dumps(SKILLS_MAP))
 
     def get_template(self):
         return """<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cockpit v8.5</title>
+    <title>Cockpit v8.6</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
@@ -1548,9 +1559,9 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
         <!-- SIDEBAR -->
         <div class="col-md-3 sidebar">
             <div class="sidebar-header">
-                <h6>COCKPIT v8.5</h6>
+                <h6>COCKPIT v8.6</h6>
                 <div class="d-flex gap-2" style="margin-bottom:4px;">
-                    <button class="header-btn" onclick="showDNA()" title="Memory Profile"><i class="bi bi-clipboard2-pulse"></i></button>
+                    <button class="header-btn" onclick="showDNA()" title="Prontuário {PERSONA_NAME}"><i class="bi bi-clipboard2-pulse"></i></button>
                     <button class="header-btn" onclick="showDailyAudit()" title="Daily Audit"><i class="bi bi-journal-text"></i></button>
                     <button class="header-btn" onclick="showCore()" title="Memória de Longo Prazo (Core)" style="font-size:1.05rem;line-height:1;">🐢</button>
                 </div>
@@ -1602,7 +1613,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
             </div>
             <div class="messages-scroll" id="chat-display">
                 <div id="welcome-msg" class="welcome">
-                    <div class="text-center"><h1>COCKPIT</h1><p>The Elder's Panopticon v8.5</p></div>
+                    <div class="text-center"><h1>COCKPIT</h1><p>The Elder's Panopticon v8.6</p></div>
                 </div>
                 <div id="loading-overlay" style="display:none;" class="loading-box">
                     <div class="spinner-border text-primary"></div>
@@ -1644,10 +1655,12 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
         let index = [], currentChat = null, currentItem = null, srcFilter = 'all';
         let searchMode = 'filter'; // 'filter' | 'semantic'
         let semanticResults = null;
-        let semanticJournal = [];  // journal bullets matched by the last deep search
+        let semanticJournal = [];  // v7.3: hits do journal na busca profunda
+        let searchDebounce = null;
         let searchToken = 0;
         let sortMode = 'recent'; // 'recent' (default) | 'relevance' — applies to deep-search results
         let lastDeepQuery = '';
+        const meta = {{META_JSON}};
 
         // Recency by default: most people want the last few days of a topic, not the
         // single most "relevant" hit. Relevance (server RRF + LLM rerank order) stays
@@ -1669,9 +1682,6 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
         function showSortToggle(show) {
             document.getElementById('sort-toggle').classList.toggle('show', show);
         }
-        const meta = {{META_JSON}};
-        const askEnabled = {{ASK_ENABLED}};
-        if (!askEnabled) document.getElementById('ask-btn').style.display = 'none';
 
         async function load() {
             try { const r = await fetch('/api/chats'); index = await r.json(); apply(); }
@@ -1729,8 +1739,8 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                 const results = Array.isArray(data) ? data : (data.results || []);
                 if (startedToken !== searchToken) return results;
 
-                semanticResults = results;
                 semanticJournal = Array.isArray(data) ? [] : (data.journal || []);
+                semanticResults = results;
                 lastDeepQuery = query;
                 setModeBadge('mode-semantic', `${auto ? 'Busca profunda' : 'Semântico'} — ${results.length} resultados`);
                 showSortToggle(results.length > 1);
@@ -1754,7 +1764,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
         }
 
         function showJournalPanel(query) {
-            // Journal hits render in the main panel, not in the chat list
+            // v8.0: hits do journal renderizam no painel principal, nao na lista
             if (!semanticJournal.length) return;
             const welcome = document.getElementById('welcome-msg');
             const container = document.getElementById('messages-container');
@@ -1773,20 +1783,43 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
             const days = Object.keys(byDate).sort().reverse();
             container.innerHTML = '<div style="max-width:900px;margin:24px auto;padding:0 16px;">'
                 + '<div style="border:1px solid rgba(168,85,247,0.45);background:rgba(168,85,247,0.06);border-radius:12px;padding:20px 24px;">'
-                + '<div style="color:#c084fc;font-size:0.8rem;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:14px;">&#129504; Journal &mdash; distilled knowledge</div>'
+                + '<div style="color:#c084fc;font-size:0.8rem;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:14px;">&#129504; Journal &mdash; conhecimento destilado</div>'
                 + days.map(d => '<div style="margin-bottom:14px;">'
                     + '<div style="color:#c084fc;font-weight:700;font-size:0.85rem;margin-bottom:6px;">' + d + '</div>'
                     + byDate[d].map(j => '<div style="padding:8px 12px;margin-bottom:6px;background:var(--bg-secondary);border:1px solid var(--border);border-left:3px solid #a855f7;border-radius:6px;font-size:0.88rem;line-height:1.55;">'
                         + '<span style="color:var(--text-muted);font-size:0.72rem;text-transform:uppercase;letter-spacing:0.5px;">' + escapeHtml(j.section) + '</span><br>'
                         + hl(j.text) + '</div>').join('')
                     + '</div>').join('')
-                + '<div style="color:var(--text-muted);font-size:0.72rem;margin-top:8px;">Source: BRAIN_DATA/journal &mdash; full chats stay in the list on the left.</div>'
+                + '<div style="color:var(--text-muted);font-size:0.72rem;margin-top:8px;">Fonte: ~/ai/brain/journal &mdash; sessoes de origem indicadas em cada item. Chats completos na lista &agrave; esquerda.</div>'
                 + '</div></div>';
             document.getElementById('chat-display').scrollTop = 0;
         }
 
         function tokenizeJs(q) {
             return (q || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').match(/[a-z0-9_]+/g) || [];
+        }
+
+        function scheduleDeepSearch(query, filteredCount) {
+            clearTimeout(searchDebounce);
+            if (query.length < 3 || filteredCount > 0) return;
+            const tokenAtSchedule = searchToken + 1;
+            searchDebounce = setTimeout(async () => {
+                if (document.getElementById('search-box').value.trim().toLowerCase() !== query) return;
+                if (searchMode !== 'filter') return;
+                const currentFiltered = index.filter(c => {
+                    const q = query;
+                    const matchTxt = !q || c.summary.toLowerCase().includes(q);
+                    const sk = document.getElementById('skill-filter').value;
+                    const mach = document.getElementById('mach-filter').value;
+                    const matchSk = (sk === 'all') || (c.skill === sk);
+                    const matchIA = (srcFilter === 'all') || (srcFilter === 'web' ? c.machine === 'WEB' : c.source === srcFilter);
+                    const matchMach = (mach === 'all') || (c.machine === mach);
+                    return matchTxt && matchSk && matchIA && matchMach;
+                });
+                if (currentFiltered.length === 0 && tokenAtSchedule > searchToken) {
+                    await runDeepSearch(query, {auto: true});
+                }
+            }, 250);
         }
 
         function apply() {
@@ -1801,9 +1834,14 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                 return matchTxt && matchSk && matchIA && matchMach;
             });
             if (t) {
-                setModeBadge('mode-filter', `Filtro rápido — ${filtered.length} resultados`);
-                // No automatic deep search here (v8.2): only Enter / the button trigger it.
+                if (filtered.length > 0) {
+                    setModeBadge('mode-filter', `Filtro rápido — ${filtered.length} resultados`);
+                } else {
+                    setModeBadge('mode-filter', 'Filtro rápido zerado; aprofundando...');
+                }
+                // v8.2: sem deep search automatica
             } else {
+                clearTimeout(searchDebounce);
                 resetSearchMode();
             }
             renderList(filtered, null);
@@ -1848,19 +1886,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
 
         // ── SEMANTIC SEARCH ──────────────────────────────────────────────────
 
-        async function doSemanticSearch() {
-            const query = document.getElementById('search-box').value.trim();
-            if (!query) { clearSearch(); return; }
-            await runDeepSearch(query, {auto: false});
-        }
-
-        function clearSearch() {
-            document.getElementById('search-box').value = '';
-            resetSearchMode();
-            apply();
-        }
-
-        // ── ASK PANOPTICON ───────────────────────────────────────────────────
+        // ── ASK PANOPTICON (v8.3) ────────────────────────────────────────────
 
         async function askPanopticon() {
             const q = document.getElementById('search-box').value.trim();
@@ -1888,6 +1914,52 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
             }
         }
 
+        // v8.6: os bullets do journal carregam "(sessão claude:093050e8)" — vira link
+        // pro chat de origem, pra poder continuar a conversa em vez de só ler a resposta.
+        const SESSION_RE = /((?:claude|codex|gemini|chatgpt)\\s*:\\s*)?([0-9a-f]{8}(?:-[0-9a-f-]+)?)/gi;
+
+        function resolveSession(short) {
+            const s = String(short).toLowerCase().replace(/-/g, '');
+            return index.find(i => (i.sid || '').toLowerCase().replace(/-/g, '').startsWith(s));
+        }
+
+        function openSessionShort(short) {
+            const hit = resolveSession(short);
+            if (hit) showChat(hit.uid);
+            else toast('Sess\\u00E3o ' + short + ' n\\u00E3o est\\u00E1 no \\u00EDndice do Cockpit');
+        }
+
+        function sessionChip(src, id) {
+            const label = escapeHtml((src ? src + ':' : '') + id);
+            if (!resolveSession(id)) return '<span title="n\\u00E3o encontrada no \\u00EDndice" style="opacity:0.55;">' + label + '</span>';
+            return '<a href="#" onclick="openSessionShort(\\'' + id + '\\');return false;" title="abrir esse chat no Cockpit"'
+                 + ' style="color:#4ade80;text-decoration:underline dotted;cursor:pointer;">' + label + '</a>';
+        }
+
+        // Só linkifica dentro do trecho que segue "sessão" (e antes de ')' ou '<'),
+        // pra não transformar MD5/hashes soltos do journal em falsos links.
+        function linkifySessions(html) {
+            return html.replace(/(sess(?:\\u00E3|a)o\\s+)([^)<]*)/gi, function(m, head, body) {
+                return head + body.replace(new RegExp(SESSION_RE.source, 'gi'), function(mm, src, id) {
+                    return sessionChip((src || '').replace(/[\\s:]/g, ''), id);
+                });
+            });
+        }
+
+        function citedSessions(text) {
+            const out = [], re = /sess(?:\\u00E3|a)o\\s+([^)<]*)/gi;
+            let m;
+            while ((m = re.exec(text)) !== null) {
+                const inner = new RegExp(SESSION_RE.source, 'gi');
+                let mm;
+                while ((mm = inner.exec(m[1])) !== null) {
+                    const src = (mm[1] || '').replace(/[\\s:]/g, '');
+                    if (!out.some(o => o.id === mm[2])) out.push({src: src, id: mm[2]});
+                }
+            }
+            return out;
+        }
+
         function showAskPanel(question, data) {
             const welcome = document.getElementById('welcome-msg');
             const container = document.getElementById('messages-container');
@@ -1895,28 +1967,49 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
             currentChat = null;
             const n = (data.sources || []).length;
             const range = n ? data.sources[n-1] + ' \\u2192 ' + data.sources[0] : '';
+            const answerHtml = linkifySessions(marked.parse(data.answer || ''));
+            const cited = citedSessions(data.answer || '');
+            const citedHtml = cited.length
+                ? '<div style="margin-top:14px;padding-top:10px;border-top:1px solid rgba(34,197,94,0.22);font-size:0.76rem;color:var(--text-muted);">'
+                  + '\\u{1F517} Fontes: ' + cited.map(c => sessionChip(c.src, c.id)).join(' \\u00B7 ') + '</div>'
+                : '';
             container.innerHTML = '<div style="max-width:900px;margin:24px auto;padding:0 16px;">'
                 + '<div style="border:1px solid rgba(34,197,94,0.45);background:rgba(34,197,94,0.05);border-radius:12px;padding:20px 24px;">'
                 + '<div style="color:#4ade80;font-size:0.8rem;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px;">\\u{1F52E} Panopticon</div>'
                 + '<div style="color:var(--text-muted);font-size:0.82rem;margin-bottom:14px;border-left:3px solid #22c55e;padding-left:10px;">' + escapeHtml(question) + '</div>'
-                + '<div style="font-size:0.92rem;line-height:1.6;">' + marked.parse(data.answer || '') + '</div>'
+                + '<div style="font-size:0.92rem;line-height:1.6;">' + answerHtml + '</div>'
+                + citedHtml
                 + '<div style="color:var(--text-muted);font-size:0.72rem;margin-top:10px;">Contexto: journal ' + range + ' (' + n + ' dias) \\u00B7 ' + (data.model || '') + ' \\u00B7 resposta gerada, confira as datas citadas</div>'
                 + '</div></div>';
             document.getElementById('chat-display').scrollTop = 0;
         }
 
+        async function doSemanticSearch() {
+            const query = document.getElementById('search-box').value.trim();
+            if (!query) { clearSearch(); return; }
+            clearTimeout(searchDebounce);
+            await runDeepSearch(query, {auto: false});
+        }
+
+        function clearSearch() {
+            clearTimeout(searchDebounce);
+            document.getElementById('search-box').value = '';
+            resetSearchMode();
+            apply();
+        }
+
         // ── EVENTS ───────────────────────────────────────────────────────────
 
         document.getElementById('search-box').addEventListener('keydown', function(e) {
-            if (e.key === 'Enter' && (e.ctrlKey || e.shiftKey) && askEnabled) {
-                askPanopticon();  // Ctrl/Shift+Enter = ask the journal
+            if (e.key === 'Enter' && (e.ctrlKey || e.shiftKey)) {
+                askPanopticon();  // v8.3
             } else if (e.key === 'Enter') {
                 doSemanticSearch();
             } else if (e.key === 'Escape') {
                 clearSearch();
             }
         });
-        // No search-as-you-type: searching runs only on Enter or the search button.
+        // v8.2: search-as-you-type removido — busca so no Enter ou no botao
         document.getElementById('skill-filter').onchange = apply;
         document.getElementById('mach-filter').onchange = apply;
 
@@ -1959,9 +2052,8 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                     date: currentItem.date || currentChat.date || '',
                 };
                 const cmdMap = {
-                    // Web captures resume in the browser, not in the CLI
                     claude: currentItem.machine === 'WEB' && currentChat.url ? currentChat.url : `claude --resume ${sessionId}`,
-                    gemini: currentItem.machine === 'WEB' && currentChat.url ? currentChat.url : `gemini --conversation ${sessionId}`,
+                    gemini: `gemini --conversation ${sessionId}`,
                     codex: `codex resume ${sessionId}`,
                     deepseek: `deepseek --resume ${sessionId}`,
                     chatgpt: currentChat.url || `https://chatgpt.com/c/${sessionId}`
@@ -2031,7 +2123,7 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
 .hdr h2{font-size:1rem;color:#8899aa;font-weight:600;margin:0;letter-spacing:1px;}
 .hdr small{color:#3a4a5a;font-size:0.7rem;}</style></head>
 <body><div class="hdr"><h2>${src.toUpperCase()} SESSION${skillLabel}</h2><small>${date} &mdash; ${currentChat.msgs.length} mensagens</small></div>${msgs}
-<div style="text-align:center;padding:24px;color:#6a7a8a;font-size:0.65rem;border-top:1px solid #1e2a3a;margin-top:24px;">Exported from Cockpit v8.5</div></body></html>`;
+<div style="text-align:center;padding:24px;color:#6a7a8a;font-size:0.65rem;border-top:1px solid #1e2a3a;margin-top:24px;">Exported from Cockpit v8.6</div></body></html>`;
 
             const blob = new Blob([html], {type: 'text/html'});
             const a = document.createElement('a');
@@ -2068,7 +2160,7 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
             currentChat = null;
 
             try {
-                const r = await fetch('/api/memory/profile');
+                const r = await fetch('/api/memory/ludovico');
                 const data = await r.json();
                 loading.style.display = 'none';
                 function formatDna(v) {
@@ -2091,7 +2183,7 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                     }
                     return String(v);
                 }
-                let html = '<div class="dna-card"><h4><i class="bi bi-clipboard2-pulse"></i> MEMORY PROFILE</h4>';
+                let html = '<div class="dna-card"><h4><i class="bi bi-clipboard2-pulse"></i> PRONTUÁRIO SKIPPY</h4>';
                 for (const [k, v] of Object.entries(data)) {
                     html += `<div class="dna-section"><strong>${k.toUpperCase()}</strong><div style="font-size:0.85rem;margin-top:4px;">${marked.parse(formatDna(v))}</div></div>`;
                 }
@@ -2127,11 +2219,11 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                     container.innerHTML = '<p style="color:#6a7a8a;text-align:center;padding:40px;">🐢 Memória ainda não gerada. Primeira consolidação roda hoje às 23:45.</p>';
                     return;
                 }
-                let html = '<div class="dna-card"><h4>🐢 INJECTED MEMORY CONTEXT</h4>';
-                html += '<div style="font-size:0.7rem;color:#6a7a8a;margin:-6px 0 16px;">Dynamic assistant context: long-term core plus recent working memory. Static identity/profile data stays separate.</div>';
+                let html = '<div class="dna-card"><h4>🐢 MEMÓRIA INJETADA NO SKIPPY</h4>';
+                html += '<div style="font-size:0.7rem;color:#6a7a8a;margin:-6px 0 16px;">Exatamente o contexto dinâmico injetado a cada boot do <code>skippy</code>: núcleo permanente + janela do dia. (Identidade estática — perfil/prontuário — vem à parte.)</div>';
                 html += '<div class="dna-section"><strong>📌 LONGO PRAZO &mdash; core (só muda por contradição)</strong>';
                 html += `<div style="font-size:0.9rem;margin-top:6px;">${coreMd ? marked.parse(coreMd) : '<em style="color:#6a7a8a;">Núcleo ainda não gerado — roda 23:45.</em>'}</div></div>`;
-                html += '<div class="dna-section" style="margin-top:16px;"><strong>🗓️ CURTO PRAZO &mdash; user-memoria.md (janela 30 dias)</strong>';
+                html += '<div class="dna-section" style="margin-top:16px;"><strong>🗓️ CURTO PRAZO &mdash; user-memory.md (janela 30 dias)</strong>';
                 html += `<div style="font-size:0.9rem;margin-top:6px;">${memMd ? marked.parse(memMd) : '<em style="color:#6a7a8a;">Sem memória de curto prazo.</em>'}</div></div>`;
                 html += '</div>';
                 container.innerHTML = html;
@@ -2299,7 +2391,7 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                     html += `</tbody></table></div></div>`;
                 }
 
-                // === LISTA DE DIAS (compacta, click expande Skippy) ===
+                // === LISTA DE DIAS (compacta, click expande {PERSONA_NAME}) ===
                 html += `<div style="color:#9ca3af; font-size:0.75rem; letter-spacing:2px; text-transform:uppercase; margin-bottom:10px;"><i class="bi bi-calendar3"></i> Histórico</div>`;
                 data.forEach((entry, entryIdx) => {
                     const dayId = `daybody_${entry.date}`;
