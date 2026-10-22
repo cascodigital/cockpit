@@ -1,7 +1,7 @@
 #!/bin/bash
 # Sync Claude Code session logs (~/.claude/projects/) -> Cockpit server.
 # Run via cron on each client machine.
-# Example cron: */5 * * * * /path/to/cockpit-oss/scripts/sync/claude_sync.sh
+# Example cron: */5 * * * * /path/to/cockpit/scripts/sync/claude_sync.sh
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

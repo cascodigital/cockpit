@@ -12,9 +12,9 @@ machines to the Cockpit server.
 4. Drop a cron entry:
 
 ```cron
-*/5 * * * * /path/to/cockpit-oss/scripts/sync/claude_sync.sh
-*/5 * * * * /path/to/cockpit-oss/scripts/sync/codex_sync.sh
-*/5 * * * * /path/to/cockpit-oss/scripts/sync/gemini_sync.sh
+*/5 * * * * /path/to/cockpit/scripts/sync/claude_sync.sh
+*/5 * * * * /path/to/cockpit/scripts/sync/codex_sync.sh
+*/5 * * * * /path/to/cockpit/scripts/sync/gemini_sync.sh
 ```
 
 Skip any sync script you don't need (e.g. no Codex installed -> drop that line).
@@ -41,7 +41,7 @@ included here; the bash scripts are the reference implementation.
 
 ## Server-side note
 
-The server (the box running `docker-compose up`) doesn't need any sync script
+The server (the box running `docker compose up`) doesn't need any sync script
 of its own — Cockpit reads directly from the `data/` volume mounted into the
 container. If the server *itself* also runs Claude/Codex/Gemini and you want
 those logs indexed, drop the appropriate sync scripts on it too with

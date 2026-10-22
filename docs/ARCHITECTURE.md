@@ -9,7 +9,7 @@ design priority is **portability and deployability** over modularity.
 
 One file, no framework. Uses Python's stdlib `http.server` with a custom
 handler. The index worker runs in a background thread and re-scans the data
-directories every 150 seconds.
+directories every `INDEX_INTERVAL` seconds (default 150).
 
 Why no FastAPI/Flask: zero dependencies on the HTTP side reduces the surface
 area for breakage. The whole UI is a single HTML string served from
@@ -23,16 +23,19 @@ Key responsibilities:
 - **Index.** BM25 over all chats (in-memory, rebuilt on change). Embeddings
   via Gemini's `batchEmbedContents`, persisted to `data/search_index.json`.
 - **Search.** Reciprocal Rank Fusion of BM25 + semantic at search time.
-- **Distill.** Once a day (~23:45 local), invoke `daily_auditor.py` and
-  `memory_distiller.py`.
+- **Distill.** Once a day (~23:45 local), invoke `memory_distiller.py`. The
+  daily audit is no longer triggered here; it runs from an external scheduler.
 
 ### `app/daily_auditor.py` — the auditor
 
-Reads today's chats (files mtimed today), assembles a sampled blob (first 5 +
-last 2 messages per chat, capped at 600 chars/msg), and sends it to DeepSeek
-(primary) or Gemini (fallback) with a Skippy-flavored prompt that returns
-structured JSON. Output appended to a rolling 14-day history in
-`data/daily_audit.json`.
+Run once a day by an external scheduler
+(`docker exec cockpit python /app/daily_auditor.py [YYYY-MM-DD]`, defaulting to
+yesterday). Selects the chats whose message timestamps fall on the target day,
+samples each one head + middle + tail (600 chars/msg, character budget split per
+chat), and sends the result to DeepSeek (primary) or Gemini (fallback) with a
+persona prompt that returns structured JSON. The entry is upserted into a rolling
+30-day history in `data/daily_audit.json`, then `generate_user_memory()` and
+`generate_user_core()` refresh the injected-memory files under `data/ai_config/`.
 
 The prompt expects strict JSON shape (see `app/daily_auditor.py` for the full
 schema). The UI's dashboard renders this directly — change the schema and the
@@ -47,10 +50,11 @@ on-demand by `GET /api/memory/weekly` — there's no schedule. Run it via cron
 
 ### `app/memory_distiller.py` — the profile builder
 
-Scans Gemini + Claude chats for keywords from `MEMORY_KEYWORDS` (or, if empty,
-just the 15 most recent), sends them to DeepSeek/Gemini, and asks for a
-long-term profile. Codex is intentionally skipped — `role:developer`
-injections (SKILL.md, system prompts) cause false positives.
+Selects Gemini + Claude sessions whose start time falls within a window after a
+`MEMORY_SKILL` activation recorded via `POST /api/skill_log`, sends them to
+DeepSeek/Gemini, and merges the result incrementally into
+`data/memory_profile.json` (recurring patterns, open homework, latest session
+summary). Codex is intentionally skipped because of false positives.
 
 ### `scripts/sync/*.sh` — the ingest layer
 
@@ -68,15 +72,16 @@ See `scripts/sync/README.md`.
                         data/codex/$CLIENT_NAME/sessions/
                         data/gemini/$CLIENT_NAME/chats/
         │
-        └─► (every 150s) index_worker()
+        └─► (every INDEX_INTERVAL s) index_worker()
               ├─► sync_claude()   — convert .jsonl → .json in data/claude_converted/
               ├─► glob + parse each source
               ├─► build BM25 (in-memory)
               └─► batchEmbedContents() — incremental, persisted to disk
         │
-        └─► (once/day @ 23:45) distillers
-              ├─► daily_auditor → data/daily_audit.json
-              └─► memory_distiller → data/memory_profile.json
+        ├─► (once/day @ 23:45, in-process) memory_distiller → data/memory_profile.json
+        │
+        └─► (once/day, external scheduler) daily_auditor → data/daily_audit.json
+              └─► data/ai_config/user-memory.md, data/ai_config/user-core.md
 ```
 
 ## Index worker invariants
@@ -96,7 +101,7 @@ See `scripts/sync/README.md`.
 - **No DB.** Filesystem is the source of truth. `search_index.json` is the
   only persisted derived artifact.
 - **No queue.** Index work is in-process. If you index thousands of chats,
-  bump `time.sleep(150)` down or run a second worker — but you're past the
+  lower `INDEX_INTERVAL` or run a second worker — but you're past the
   intended scale by then.
 - **No alembic / migrations.** Schema changes happen by re-running distillers
   with the new prompt. Old entries keep their old shape until overwritten.

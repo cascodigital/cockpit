@@ -29,14 +29,14 @@ except ImportError:
 import memory_distiller
 import daily_auditor
 
-# Identidade injetada por scripts/promote.py — o mirror OSS não carrega
-# nome de pessoa nem persona hardcoded.
+# Identity injected by scripts/promote.py — the OSS mirror carries no
+# hardcoded person name or persona.
 USER_NAME = os.environ.get("USER_NAME", "the user")
 PERSONA_NAME = os.environ.get("PERSONA_NAME", "the auditor")
 MEMORY_SKILL = os.environ.get("MEMORY_SKILL", "").strip()
 
 
-# CONFIGURAÇÃO
+# CONFIGURATION
 PORT = int(os.environ.get('PORT', 8000))
 GEMINI_BASE_DIR = os.environ.get('GEMINI_DATA', '/app/data/gemini')
 CLAUDE_PROJECTS_DIR = os.environ.get('CLAUDE_DATA', '/app/data/claude')
@@ -51,16 +51,16 @@ SKILL_LOG_PATH = os.path.join(DATA_DIR, 'skill_log.jsonl')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
 RERANK_MODEL = os.environ.get('RERANK_MODEL', 'gpt-4o-mini')  # v7.1 LLM reranker
 RERANK_TOP = int(os.environ.get('RERANK_TOP', '30'))  # how many candidates to rerank (full pool)
-ASK_MODEL = os.environ.get('ASK_MODEL', 'gpt-4o-mini')  # v8.3 /api/ask (Pergunte ao Panopticon)
+ASK_MODEL = os.environ.get('ASK_MODEL', 'gpt-4o-mini')  # v8.3 /api/ask (Ask the Panopticon)
 ASK_CHAR_BUDGET = int(os.environ.get('ASK_CHAR_BUDGET', '90000'))  # journal context cap (~27k tokens)
-ASK_RECENT_DAYS = int(os.environ.get('ASK_RECENT_DAYS', '5'))  # v8.4: dias recentes sempre no contexto
+ASK_RECENT_DAYS = int(os.environ.get('ASK_RECENT_DAYS', '5'))  # v8.4: newest days always included in context
 INDEX_INTERVAL = int(os.environ.get('INDEX_INTERVAL', '150'))  # seconds between filesystem index scans
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 EMBED_DISABLED = False  # set True on first API failure
 EMBED_RUNNING = False  # prevent concurrent embed threads
 EMBED_CAP_HIT = False  # set when Gemini returns 429 spending-cap/quota
 SEARCH_INDEX_PATH = os.path.join(DATA_DIR, 'search_index.json')
-BRAIN_DIR = os.environ.get('BRAIN_DATA', '/app/data/brain')  # v7.3: second-brain vault (journal destilado)
+BRAIN_DIR = os.environ.get('BRAIN_DATA', '/app/data/brain')  # v7.3: second-brain vault (distilled journal)
 
 # Keep in sync with the skills that actually exist on disk (~/.claude/skills).
 # Stale entries here show wrong/empty badges in the sidebar and a dead option in
@@ -70,7 +70,7 @@ SKILLS_MAP = {
     'skadv':       {'icon': '⚖️', 'name': 'Advogado'},
     'skcnpj':      {'icon': '🤝', 'name': 'Saul'},
     'skcoz':       {'icon': '🍳', 'name': 'Cozinha'},
-    'skcra':       {'icon': '🏗️', 'name': 'Crane'},
+    'skcra':       {'icon': '🏗️', 'name': 'Client'},
     'skcpf':       {'icon': '💼', 'name': 'Carreira'},
     'skcreator':   {'icon': '🏗️', 'name': 'Creator'},
     'skeng':       {'icon': '🇬🇧', 'name': 'English'},
@@ -571,7 +571,7 @@ def llm_rerank(query, candidates):
         return None
 
 def list_journal():
-    """v7.3: arquivos do journal do second brain, mais recentes primeiro."""
+    """v7.3: second-brain journal files, newest first."""
     out = []
     jdir = os.path.join(BRAIN_DIR, 'journal')
     if not os.path.isdir(jdir):
@@ -585,12 +585,12 @@ def list_journal():
     return out
 
 def search_journal(query, limit=8):
-    """v7.3: casa termos da query com bullets destilados do journal."""
-    terms = [t for t in tokenize(query) if len(t) >= 3]  # ignora filler curto (a, da, de...)
+    """v7.3: match query terms against distilled journal bullets."""
+    terms = [t for t in tokenize(query) if len(t) >= 3]  # drop short filler words (a, of, to...)
     if not terms:
         return []
-    # perguntas naturais trazem filler ("como ficou...") que nunca esta no journal:
-    # exigir so 1/3 dos termos e ranquear por score — corpus pequeno, ruido baixo
+    # natural questions carry filler ("how did ... end") that never appears in the journal:
+    # require only 1/3 of the terms and rank by score — small corpus, low noise
     need = max(1, len(terms) // 3)
     hits = []
     for day in list_journal():
@@ -610,16 +610,16 @@ def search_journal(query, limit=8):
     return [{'date': h['date'], 'section': h['section'], 'text': h['text']} for h in hits[:limit]]
 
 def ask_panopticon(question):
-    """v8.4: responde pergunta em linguagem natural usando o journal como contexto (gpt-4o-mini).
-    Selecao RAG-lite: os ASK_RECENT_DAYS mais recentes entram sempre; dias antigos so entram
-    se casarem com termos da pergunta (score de termos distintos, mesmo criterio do
-    search_journal). Prioridade no budget: recentes primeiro, depois casados por score.
-    Escala pra journal de anos sem estourar janela nem diluir a atencao do modelo."""
+    """v8.4: answer a natural-language question using the journal as context (gpt-4o-mini).
+    RAG-lite selection: the ASK_RECENT_DAYS newest days always enter; older days only enter
+    if they match the question's terms (distinct-term score, same criterion as
+    search_journal). Budget priority: recent days first, then matches by score.
+    Scales to years of journal without overflowing the window or diluting the model's attention."""
     if not OPENAI_API_KEY:
-        return {'error': 'OPENAI_API_KEY ausente no container'}
-    days = list_journal()  # ja vem mais recente primeiro
+        return {'error': 'OPENAI_API_KEY missing in the container'}
+    days = list_journal()  # already newest first
     if not days:
-        return {'error': 'journal vazio ou inacessivel'}
+        return {'error': 'journal empty or inaccessible'}
     terms = [t for t in tokenize(question) if len(t) >= 3]
     need = max(1, len(terms) // 3)
     recent = days[:ASK_RECENT_DAYS]
@@ -631,14 +631,14 @@ def ask_panopticon(question):
             matched.append((score, day))
     matched.sort(key=lambda x: (x[0], x[1]['date']), reverse=True)
     picked, total = {}, 0
-    for day in recent + [d for _, d in matched]:  # ordem = prioridade no budget
+    for day in recent + [d for _, d in matched]:  # order = budget priority
         block = f"### {day['date']}\n{day['content'].strip()}"
         if total + len(block) > ASK_CHAR_BUDGET and picked:
-            continue  # dia nao coube; dias menores seguintes ainda podem caber
+            continue  # day did not fit; smaller later days may still fit
         picked[day['date']] = block
         total += len(block)
     used_dates = sorted(picked, reverse=True)
-    ctx_parts = [picked[d] for d in used_dates]  # prompt sempre cronologico (recente primeiro)
+    ctx_parts = [picked[d] for d in used_dates]  # prompt is always chronological (newest first)
     system = (
         "Você é o Panopticon, a memória de longo prazo destilada do {USER_NAME} (journal do second brain). "
         "Responda a pergunta usando EXCLUSIVAMENTE o journal abaixo. Regras: "
@@ -945,18 +945,18 @@ def index_worker():
         now = datetime.now()
         if now.hour == 23 and now.minute >= 45 and last_distill_date != now.date():
             last_distill_date = now.date()
-            # Prontuário psicológico PRIMEIRO: assim a memória do dia já lê o ludovico_dna fresco
-            # (terapia do dia entra na injeção do skippy na mesma noite, sem lag de 1 ciclo).
+            # Memory profile FIRST, so the day's memory already reads a fresh memory_profile.json
+            # (the day's coaching session reaches the injected context the same night, no 1-cycle lag).
             try:
                 import importlib
                 importlib.reload(memory_distiller)
                 memory_distiller.distill_memory()
-                print(f'[{now}] [MemoryProfile] Prontuário updated.')
+                print(f'[{now}] [MemoryProfile] Profile updated.')
             except Exception as e:
                 print(f'[{now}] [MemoryProfile] Error: {e}')
-            # [Daily Audit] movido para n8n (workflow 03:05: docker exec cockpit
-            # python /app/daily_auditor.py <ontem>). Gatilho interno das 23:45
-            # desativado p/ fonte unica + catch-up por data. -- {PERSONA_NAME} 2026-07-22
+            # [Daily Audit] moved to an external scheduler (03:05: docker exec cockpit
+            # python /app/daily_auditor.py <yesterday>). The internal 23:45 trigger was
+            # disabled for a single source of truth + date-based catch-up. (2026-07-22)
         time.sleep(INDEX_INTERVAL)
 
 # ─── HTTP HANDLER ────────────────────────────────────────────────────────────
@@ -1008,7 +1008,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                     self.wfile.write(data.encode('utf-8'))
                 else: self.send_response(404); self.end_headers(); self.wfile.write(b'day memory not found')
             elif self.path == '/api/memory/weekly':
-                # Sempre regenera — chamado 1×/semana pelo n8n. Custo: 1 call DeepSeek.
+                # Always regenerates — called once a week by an external scheduler. Cost: 1 DeepSeek call.
                 try:
                     import weekly_digest, importlib
                     importlib.reload(weekly_digest)
@@ -1078,7 +1078,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(json.dumps(payload).encode('utf-8'))
 
             elif self.path == '/api/ask':
-                # v8.3: Pergunte ao Panopticon — journal como contexto, gpt-4o-mini responde
+                # v8.3: Ask the Panopticon — journal as context, gpt-4o-mini answers
                 content_length = int(self.headers.get('Content-Length', 0))
                 body = self.rfile.read(content_length).decode('utf-8')
                 data = json.loads(body)
@@ -1655,7 +1655,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
         let index = [], currentChat = null, currentItem = null, srcFilter = 'all';
         let searchMode = 'filter'; // 'filter' | 'semantic'
         let semanticResults = null;
-        let semanticJournal = [];  // v7.3: hits do journal na busca profunda
+        let semanticJournal = [];  // v7.3: journal hits from deep search
         let searchDebounce = null;
         let searchToken = 0;
         let sortMode = 'recent'; // 'recent' (default) | 'relevance' — applies to deep-search results
@@ -1764,7 +1764,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
         }
 
         function showJournalPanel(query) {
-            // v8.0: hits do journal renderizam no painel principal, nao na lista
+            // v8.0: journal hits render in the main panel, not in the list
             if (!semanticJournal.length) return;
             const welcome = document.getElementById('welcome-msg');
             const container = document.getElementById('messages-container');
@@ -1839,7 +1839,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                 } else {
                     setModeBadge('mode-filter', 'Filtro rápido zerado; aprofundando...');
                 }
-                // v8.2: sem deep search automatica
+                // v8.2: no automatic deep search
             } else {
                 clearTimeout(searchDebounce);
                 resetSearchMode();
@@ -1914,8 +1914,8 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
             }
         }
 
-        // v8.6: os bullets do journal carregam "(sessão claude:093050e8)" — vira link
-        // pro chat de origem, pra poder continuar a conversa em vez de só ler a resposta.
+        // v8.6: journal bullets carry "(sessão claude:093050e8)" — turned into a link
+        // to the source chat, so the conversation can be continued instead of only read.
         const SESSION_RE = /((?:claude|codex|gemini|chatgpt)\\s*:\\s*)?([0-9a-f]{8}(?:-[0-9a-f-]+)?)/gi;
 
         function resolveSession(short) {
@@ -1936,8 +1936,8 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                  + ' style="color:#4ade80;text-decoration:underline dotted;cursor:pointer;">' + label + '</a>';
         }
 
-        // Só linkifica dentro do trecho que segue "sessão" (e antes de ')' ou '<'),
-        // pra não transformar MD5/hashes soltos do journal em falsos links.
+        // Only linkify inside the span that follows "sessão" (and before ')' or '<'),
+        // so stray MD5s/hashes in the journal do not become false links.
         function linkifySessions(html) {
             return html.replace(/(sess(?:\\u00E3|a)o\\s+)([^)<]*)/gi, function(m, head, body) {
                 return head + body.replace(new RegExp(SESSION_RE.source, 'gi'), function(mm, src, id) {
@@ -2009,7 +2009,7 @@ class HistoryHandler(http.server.SimpleHTTPRequestHandler):
                 clearSearch();
             }
         });
-        // v8.2: search-as-you-type removido — busca so no Enter ou no botao
+        // v8.2: search-as-you-type removed — search only on Enter or the button
         document.getElementById('skill-filter').onchange = apply;
         document.getElementById('mach-filter').onchange = apply;
 
@@ -2183,7 +2183,7 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                     }
                     return String(v);
                 }
-                let html = '<div class="dna-card"><h4><i class="bi bi-clipboard2-pulse"></i> PRONTUÁRIO SKIPPY</h4>';
+                let html = '<div class="dna-card"><h4><i class="bi bi-clipboard2-pulse"></i> PRONTUÁRIO {PERSONA_NAME}</h4>';
                 for (const [k, v] of Object.entries(data)) {
                     html += `<div class="dna-section"><strong>${k.toUpperCase()}</strong><div style="font-size:0.85rem;margin-top:4px;">${marked.parse(formatDna(v))}</div></div>`;
                 }
@@ -2219,8 +2219,8 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                     container.innerHTML = '<p style="color:#6a7a8a;text-align:center;padding:40px;">🐢 Memória ainda não gerada. Primeira consolidação roda hoje às 23:45.</p>';
                     return;
                 }
-                let html = '<div class="dna-card"><h4>🐢 MEMÓRIA INJETADA NO SKIPPY</h4>';
-                html += '<div style="font-size:0.7rem;color:#6a7a8a;margin:-6px 0 16px;">Exatamente o contexto dinâmico injetado a cada boot do <code>skippy</code>: núcleo permanente + janela do dia. (Identidade estática — perfil/prontuário — vem à parte.)</div>';
+                let html = '<div class="dna-card"><h4>🐢 MEMÓRIA INJETADA NO {PERSONA_NAME}</h4>';
+                html += '<div style="font-size:0.7rem;color:#6a7a8a;margin:-6px 0 16px;">Exatamente o contexto dinâmico injetado a cada boot do assistente: núcleo permanente + janela do dia. (Identidade estática — perfil/prontuário — vem à parte.)</div>';
                 html += '<div class="dna-section"><strong>📌 LONGO PRAZO &mdash; core (só muda por contradição)</strong>';
                 html += `<div style="font-size:0.9rem;margin-top:6px;">${coreMd ? marked.parse(coreMd) : '<em style="color:#6a7a8a;">Núcleo ainda não gerado — roda 23:45.</em>'}</div></div>`;
                 html += '<div class="dna-section" style="margin-top:16px;"><strong>🗓️ CURTO PRAZO &mdash; user-memory.md (janela 30 dias)</strong>';
@@ -2253,7 +2253,7 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
         }
 
         function _buildHeatmapData(entries) {
-            // Para cada entry, garante categories nos chats e day_metrics
+            // For each entry, ensure categories on chats and day_metrics
             const CATS = ['Infra','MSP-Support','Business','Dev','IA-Tooling','Trading','Finanças','Saúde','Aprendizado','Pessoal','Outros'];
             const present = new Set();
             const days = entries.map(e => {
@@ -2267,13 +2267,13 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                 });
                 return { date: e.date, counts, total: (e.chats || []).length };
             });
-            // ordena categorias pela ordem canônica, só as presentes
+            // sort categories by canonical order, present ones only
             const cats = CATS.filter(c => present.has(c));
             return { cats, days };
         }
 
         function _heatColor(intensity) {
-            // 0..1 → teal escuro a teal claro
+            // 0..1 → dark teal to light teal
             if (intensity <= 0) return 'rgba(255,255,255,0.04)';
             const a = 0.15 + intensity * 0.7;
             return `rgba(20,184,166,${a.toFixed(2)})`;
@@ -2318,19 +2318,19 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                     return;
                 }
 
-                // === STATS GLOBAIS (últimos 14 dias) ===
+                // === GLOBAL STATS (last 14 days) ===
                 const totalSessions = data.reduce((s, e) => s + ((e.chats || []).length), 0);
                 const switchesArr = data.map(e => (e.day_metrics && e.day_metrics.context_switches) || null).filter(x => x != null);
                 const avgSwitches = switchesArr.length ? (switchesArr.reduce((a,b)=>a+b,0) / switchesArr.length).toFixed(1) : '—';
                 const latestFocus = (data[0].day_metrics && data[0].day_metrics.focus_score != null) ? data[0].day_metrics.focus_score : '—';
-                // tema dominante: contagem global de categorias
+                // dominant theme: global category count
                 const heat = _buildHeatmapData(data);
                 const totalsByCat = {};
                 heat.days.forEach(d => Object.entries(d.counts).forEach(([k,v]) => { totalsByCat[k] = (totalsByCat[k] || 0) + v; }));
                 const dominantTheme = Object.entries(totalsByCat).sort((a,b)=>b[1]-a[1])[0];
                 const dominantLabel = dominantTheme ? `${dominantTheme[0]} (${dominantTheme[1]})` : '—';
 
-                // dia mais focado (maior focus_score)
+                // most focused day (highest focus_score)
                 const focusedDay = data.filter(e => e.day_metrics && e.day_metrics.focus_score != null)
                                        .sort((a,b) => b.day_metrics.focus_score - a.day_metrics.focus_score)[0];
                 const focusedLabel = focusedDay ? `${focusedDay.date} (${focusedDay.day_metrics.focus_score}/10)` : '—';
@@ -2361,7 +2361,7 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                 // === HEATMAP ===
                 if (heat.cats.length > 0 && heat.days.length > 0) {
                     const maxCount = Math.max(1, ...heat.days.flatMap(d => Object.values(d.counts)));
-                    // dias mais antigos à esquerda → mais recentes à direita
+                    // oldest days on the left → newest on the right
                     const sortedDays = [...heat.days].reverse();
 
                     html += `<div style="margin-bottom:24px;">
@@ -2391,7 +2391,7 @@ pre{background:#010409;padding:14px;border-radius:8px;border:1px solid #1e2a3a;o
                     html += `</tbody></table></div></div>`;
                 }
 
-                // === LISTA DE DIAS (compacta, click expande {PERSONA_NAME}) ===
+                // === DAY LIST (compact, click expands the persona view) ===
                 html += `<div style="color:#9ca3af; font-size:0.75rem; letter-spacing:2px; text-transform:uppercase; margin-bottom:10px;"><i class="bi bi-calendar3"></i> Histórico</div>`;
                 data.forEach((entry, entryIdx) => {
                     const dayId = `daybody_${entry.date}`;

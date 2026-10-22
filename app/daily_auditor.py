@@ -4,23 +4,23 @@ import glob
 from datetime import datetime, timedelta, timezone
 import requests
 
-# Identidade injetada por scripts/promote.py — o mirror OSS não carrega
-# nome de pessoa nem persona hardcoded.
+# Identity injected by scripts/promote.py — the OSS mirror carries no
+# hardcoded person name or persona.
 USER_NAME = os.environ.get("USER_NAME", "the user")
 PERSONA_NAME = os.environ.get("PERSONA_NAME", "the auditor")
 MEMORY_SKILL = os.environ.get("MEMORY_SKILL", "").strip()
 
 
-# Configurações
+# Settings
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 BRT = timezone(timedelta(hours=-3))
 GEMINI_DIR = os.path.join(DATA_DIR, "gemini")
 CLAUDE_DIR = os.path.join(DATA_DIR, "claude_converted")
 CODEX_DIR = os.path.join(DATA_DIR, "codex")
-# Claude Web. É a ÚNICA fonte web que entra na memória: o sync dela usa o
-# `created_at` real da conversa. O gemini_site fica de fora porque 141 das suas 199
-# conversas têm data-sentinela 2025-12-31, e o chatgpt_site por decisão do usuário
-# (fonte em desuso). Ver docs/MEMORY-PIPELINE.md.
+# Claude Web. It is the ONLY web source that feeds memory: its sync uses the
+# conversation's real `created_at`. gemini_site stays out because 141 of its 199
+# conversations carry the sentinel date 2025-12-31, and chatgpt_site by the user's
+# choice (source being retired). See docs/MEMORY-PIPELINE.md.
 CLAUDE_SITE_DIR = os.path.join(DATA_DIR, "claude_site")
 OUTPUT_FILE = os.path.join(DATA_DIR, "daily_audit.json")
 
@@ -28,8 +28,8 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 
 def _brt_date(ts):
-    """Timestamp ISO (UTC, sufixo Z) -> data BRT 'YYYY-MM-DD'. None se não parsear.
-    Sem a conversão, as 3 primeiras horas UTC de cada dia caem no dia errado."""
+    """ISO timestamp (UTC, Z suffix) -> BRT date 'YYYY-MM-DD'. None if unparseable.
+    Without the conversion, the first 3 UTC hours of each day land on the wrong day."""
     if not ts:
         return None
     s = str(ts).strip()
@@ -45,15 +45,15 @@ def _brt_date(ts):
 
 
 def get_todays_chats(target_str=None):
-    """Chats cuja ATIVIDADE REAL ocorreu em `target_str` (data BRT).
+    """Chats whose REAL ACTIVITY happened on `target_str` (BRT date).
 
-    Antes o filtro era o mtime do arquivo convertido — que é carimbado pelo sync,
-    não pela conversa. Resultado: o backfill noturno do Claude Web/Gemini web
-    reescrevia conversas antigas com mtime de hoje e elas entravam na auditoria do
-    dia errado. Agora o critério é o timestamp das mensagens; o mtime sobrou só
-    como pré-filtro barato (um arquivo que contém mensagens do dia D não pode ter
-    sido escrito antes de D), o que evita abrir os ~3.500 arquivos / 825 MB a cada
-    rodada. Sessão que atravessa a meia-noite conta nos dois dias, de propósito.
+    The filter used to be the converted file's mtime — which is stamped by the sync,
+    not by the conversation. Result: the nightly Claude Web/Gemini web backfill
+    rewrote old conversations with today's mtime and they landed in the wrong
+    day's audit. The criterion is now the message timestamps; mtime survives only
+    as a cheap pre-filter (a file containing messages from day D cannot have been
+    written before D), which avoids opening ~3,500 files / 825 MB on every run.
+    A session that crosses midnight counts on both days, on purpose.
     """
     chats = []
     today_str = target_str or datetime.now().strftime("%Y-%m-%d")
@@ -64,20 +64,20 @@ def get_todays_chats(target_str=None):
         day_start = 0
 
     def maybe(filepath):
-        """Pré-filtro por mtime: descarta o que é velho demais para conter o dia."""
+        """mtime pre-filter: drop files too old to contain the target day."""
         try:
             return os.path.getmtime(filepath) >= day_start
         except OSError:
             return False
 
     def touched(msgs):
-        """True se alguma mensagem do chat caiu no dia alvo (hora BRT)."""
+        """True if any chat message falls on the target day (BRT time)."""
         for m in msgs:
             if _brt_date(m.get("timestamp")) == today_str:
                 return True
         return False
 
-    # Busca em Gemini
+    # Scan Gemini
     for f in glob.glob(os.path.join(GEMINI_DIR, "**", "*.json"), recursive=True):
         if maybe(f):
             try:
@@ -90,7 +90,7 @@ def get_todays_chats(target_str=None):
                         chats.append({"uid": uid, "source": "gemini", "messages": msgs})
             except: continue
 
-    # Busca em Claude Convertido
+    # Scan converted Claude
     for f in glob.glob(os.path.join(CLAUDE_DIR, "*.json")):
         if maybe(f):
             try:
@@ -103,7 +103,7 @@ def get_todays_chats(target_str=None):
                         chats.append({"uid": uid, "source": "claude", "messages": msgs})
             except: continue
 
-    # Busca em Codex (JSONL nativo, parse linha-a-linha; ignora role:developer = SKILL.md injection)
+    # Scan Codex (native JSONL, parsed line by line; skips role:developer = SKILL.md injection)
     for f in glob.glob(os.path.join(CODEX_DIR, "**", "*.jsonl"), recursive=True):
         if maybe(f):
             try:
@@ -136,8 +136,8 @@ def get_todays_chats(target_str=None):
                     chats.append({"uid": uid, "source": "codex", "messages": messages})
             except: continue
 
-    # Busca em Claude Web. O uid replica o do indexador (`claude-web-<rel>` com os
-    # separadores virados em `__`), senão o drill-down da auditoria não acha o chat.
+    # Scan Claude Web. The uid mirrors the indexer's (`claude-web-<rel>` with path
+    # separators turned into `__`), otherwise the audit drill-down cannot find the chat.
     if os.path.isdir(CLAUDE_SITE_DIR):
         for f in glob.glob(os.path.join(CLAUDE_SITE_DIR, "**", "*.json"), recursive=True):
             if maybe(f):
@@ -147,8 +147,8 @@ def get_todays_chats(target_str=None):
                     with open(f, 'r', encoding='utf-8') as j:
                         data = json.load(j)
                         msgs = data.get("messages", [])
-                        # Aqui o startTime é o critério bom: o timestamp por mensagem
-                        # é constante (carimbo da captura), não cronologia real.
+                        # Here startTime is the right criterion: the per-message timestamp
+                        # is constant (capture stamp), not real chronology.
                         if _brt_date(data.get("startTime")) == today_str or touched(msgs):
                             chats.append({"uid": uid, "source": "claude-web", "messages": msgs})
                 except: continue
@@ -181,15 +181,15 @@ def generate_daily_audit(target_str=None):
     today_str = target_str or datetime.now().strftime("%Y-%m-%d")
     
     if not chats:
-        print(f"Nenhum chat processado hoje ({today_str}).")
+        print(f"No chats processed for {today_str}.")
         return
 
-    # Amostragem INÍCIO + MEIO + FIM. A anterior era msgs[:5] + msgs[-2:], que só via
-    # a abertura e o encerramento: a pendência nasce no começo do chat e a resolução
-    # quase sempre acontece no meio, então o modelo via o problema e nunca o conserto —
-    # e as pendências ficavam imortais no open_threads.
-    # O orçamento é REPARTIDO entre os chats: antes o full_text era truncado em 40k no
-    # fim, e como a ordem é gemini → claude → codex, o Codex era sempre o decapitado.
+    # HEAD + MIDDLE + TAIL sampling. The previous msgs[:5] + msgs[-2:] only saw the
+    # opening and the close: a pending item is born at the start of a chat and its fix
+    # almost always happens in the middle, so the model saw the problem and never the fix —
+    # and pending items became immortal in open_threads.
+    # The budget is SPLIT across chats: full_text used to be truncated at 40k at the
+    # end, and since the order is gemini → claude → codex, Codex was always the one cut.
     TOTAL_BUDGET = 90000
     per_chat = max(1500, TOTAL_BUDGET // max(1, len(chats)))
 
@@ -239,8 +239,8 @@ def generate_daily_audit(target_str=None):
                     "elder_verdict": entry.get("elder_verdict"),
                     "day_metrics": entry.get("day_metrics", {}),
                     "workstreams": entry.get("workstreams", []),
-                    # Sem estes dois o modelo não enxerga o que já estava aberto nem o que
-                    # já morreu, e a regra de encerramento vira letra morta.
+                    # Without these two the model cannot see what was already open or what
+                    # already died, and the close rule becomes dead letter.
                     "open_threads": brief.get("open_threads", []),
                     "resolved_threads": brief.get("resolved_threads", []),
                 })
@@ -288,7 +288,7 @@ def generate_daily_audit(target_str=None):
         f"FORMATO JSON ESTRITO (responda APENAS JSON puro, sem markdown, sem ```):\n"
         f"{{\n"
         f"  \"date\": \"{today_str}\",\n"
-        f"  \"hyperfocus\": \"Tema operacional dominante em 2-4 palavras (ex: 'Cockpit Ops', 'Crane Support', 'n8n Cleanup')\",\n"
+        f"  \"hyperfocus\": \"Tema operacional dominante em 2-4 palavras (ex: 'Cockpit Ops', 'Client Support', 'n8n Cleanup')\",\n"
         f"  \"headline\": \"Manchete curta de Daily Ops Brief, concreta e com voz {PERSONA_NAME}. Não reciclar manchetes recentes.\",\n"
         f"  \"narrative\": \"Parágrafo único (4-6 frases) contando o dia como operação: quais frentes existiram, onde houve avanço real, onde ficou bloqueado e qual foi o arco principal. Voz {PERSONA_NAME}, sem sermão repetido.\",\n"
         f"  \"pattern_insight\": \"1-2 frases com DELTA comportamental ou operacional de hoje. Se não houver padrão novo, diga que o paralelismo foi normal e cite o único risco concreto, se existir.\",\n"
@@ -345,10 +345,10 @@ def generate_daily_audit(target_str=None):
     )
 
     try:
-        print("Buscando sabedoria dos Elders (DeepSeek/Gemini)...")
+        print("Requesting daily audit from DeepSeek/Gemini...")
         raw_json = call_deepseek(prompt_text)
         if not raw_json: raw_json = call_gemini(prompt_text)
-        if not raw_json: raise Exception("Nenhuma API disponível.")
+        if not raw_json: raise Exception("No LLM API available.")
 
         raw_json = raw_json.replace("```json", "").replace("```", "").strip()
         new_audit = json.loads(raw_json)
@@ -375,12 +375,12 @@ def generate_daily_audit(target_str=None):
         with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
             json.dump(history, f, indent=2, ensure_ascii=False)
         
-        print(f"Auditoria diária atualizada com sucesso em {OUTPUT_FILE}")
+        print(f"Daily audit updated in {OUTPUT_FILE}")
         generate_user_memory()
         generate_user_core()
 
     except Exception as e:
-        print(f"Erro na auditoria: {e}")
+        print(f"Audit error: {e}")
 
 def call_deepseek_text(prompt_text):
     if not DEEPSEEK_API_KEY: return None
@@ -395,18 +395,18 @@ def call_deepseek_text(prompt_text):
     return response.json()['choices'][0]['message']['content']
 
 def compact_history(history, budget=150000):
-    """Projeção compacta do histórico de auditorias, cortada por DIA INTEIRO.
+    """Compact projection of the audit history, trimmed by WHOLE DAY.
 
-    O `json.dumps(history)[:80000]` anterior entregava 20% do arquivo (6 dias de 30)
-    e ainda cortava no meio de um objeto — o modelo recebia JSON inválido e uma
-    janela que ele achava ser o mês todo. O array `chats[]` de cada dia é ~70% do
-    peso e não serve para consolidar memória, então sai. Descarta-se do mais ANTIGO
-    para o mais novo, nunca no meio de um dia.
+    The previous `json.dumps(history)[:80000]` delivered 20% of the file (6 of 30 days)
+    and also cut in the middle of an object — the model received invalid JSON and a
+    window it believed was the whole month. Each day's `chats[]` array is ~70% of the
+    weight and is useless for memory consolidation, so it is dropped. Days are discarded
+    from OLDEST to newest, never in the middle of a day.
     """
     KEEP = ("date", "headline", "pattern_insight", "elder_verdict",
             "ops_brief", "workstreams", "day_metrics")
     kept, used = [], 0
-    for entry in history:  # já vem do mais recente para o mais antigo
+    for entry in history:  # already newest to oldest
         item = {k: entry.get(k) for k in KEEP if entry.get(k) is not None}
         size = len(json.dumps(item, ensure_ascii=False))
         if used + size > budget:
@@ -424,7 +424,7 @@ def generate_user_memory():
         with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
             history = json.load(f)
     except Exception as e:
-        print(f"Erro ao ler auditoria para memoria: {e}")
+        print(f"Error reading audit for memory: {e}")
         return
 
     if not history:
@@ -434,24 +434,24 @@ def generate_user_memory():
     os.makedirs(ai_config_dir, exist_ok=True)
     memory_file = os.path.join(ai_config_dir, "user-memory.md")
 
-    ludovico_file = os.path.join(DATA_DIR, "memory_profile.json")
-    ludovico_text = "Sem prontuário disponível."
-    if os.path.exists(ludovico_file):
+    profile_file = os.path.join(DATA_DIR, "memory_profile.json")
+    profile_text = "Sem prontuário disponível."
+    if os.path.exists(profile_file):
         try:
-            with open(ludovico_file, 'r', encoding='utf-8') as lf:
-                ludovico_data = json.load(lf)
-                bugs = ", ".join(ludovico_data.get("recurring_bugs", [])[:5])
-                hw = ", ".join(ludovico_data.get("pending_homework", [])[:5])
-                dna = ludovico_data.get("personality_dna", {})
+            with open(profile_file, 'r', encoding='utf-8') as lf:
+                profile_data = json.load(lf)
+                bugs = ", ".join(profile_data.get("recurring_bugs", [])[:5])
+                hw = ", ".join(profile_data.get("pending_homework", [])[:5])
+                dna = profile_data.get("personality_dna", {})
                 em = dna.get("emotional_state", "")
                 en = dna.get("energy_level", "")
-                ludovico_text = f"Bugs recorrentes: {bugs}. Homework pendente: {hw}. Emocional: {em}. Energia: {en}."
+                profile_text = f"Bugs recorrentes: {bugs}. Homework pendente: {hw}. Emocional: {em}. Energia: {en}."
         except Exception as e:
-            ludovico_text = "Erro ao carregar prontuário."
+            profile_text = "Erro ao carregar prontuário."
 
     today_str = datetime.now().strftime("%Y-%m-%d")
-    history_text, _dias_ok, _dias_tot = compact_history(history)
-    print(f"[Memoria] historico compacto: {_dias_ok}/{_dias_tot} dias ({len(history_text)} chars)")
+    history_text, _days_ok, _days_total = compact_history(history)
+    print(f"[Memory] compact history: {_days_ok}/{_days_total} days ({len(history_text)} chars)")
 
     prompt_text = (
         f"Você é a mente de síntese do {USER_NAME}. Sua tarefa é criar um documento de memória de contexto "
@@ -463,7 +463,7 @@ def generate_user_memory():
         f"diagnósticos, medicações, regras de interação, nem a dica de ler `infra.md`. Foque apenas em memória "
         f"dinâmica e contexto operacional recente.\n\n"
         f"Abaixo está o histórico de auditoria diária dos últimos dias e um resumo do Prontuário Psicológico "
-        f"(MemoryProfile DNA): {ludovico_text}\n\n"
+        f"(MemoryProfile DNA): {profile_text}\n\n"
         f"REGRAS ESTRITAS:\n"
         f"1. LIMITAÇÃO RIGOROSA: o arquivo final NÃO PODE passar de ~700 tokens.\n"
         f"2. FORMATO: Markdown válido, limpo, com estes blocos quando houver conteúdo: "
@@ -490,10 +490,10 @@ def generate_user_memory():
         f"Responda APENAS com o conteúdo do arquivo Markdown, sem textos extras."
     )
 
-    print("Gerando memória do {USER_NAME} via DeepSeek...")
+    print("Generating short-term memory via DeepSeek...")
     memory_md = call_deepseek_text(prompt_text)
     if not memory_md:
-        print("DeepSeek sem resposta para memória. Tentando Gemini...")
+        print("DeepSeek returned nothing for memory. Trying Gemini...")
         memory_md = call_gemini(prompt_text)
     
     if memory_md:
@@ -508,20 +508,20 @@ def generate_user_memory():
 
         with open(memory_file, 'w', encoding='utf-8') as f:
             f.write(memory_md)
-        print(f"Memória do {USER_NAME} atualizada com sucesso em {memory_file}")
+        print(f"Short-term memory updated in {memory_file}")
     else:
-        print("Falha ao gerar a memória.")
+        print("Failed to generate memory.")
 
 def generate_user_core():
-    """Camada de memória de LONGO PRAZO. Consolida fatos estáveis do histórico de
-    30 dias num núcleo permanente que só decai por CONTRADIÇÃO, nunca por tempo."""
+    """LONG-TERM memory layer. Consolidates stable facts from the 30-day history
+    into a permanent core that decays only by CONTRADICTION, never by age."""
     if not os.path.exists(OUTPUT_FILE):
         return
     try:
         with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
             history = json.load(f)
     except Exception as e:
-        print(f"Erro ao ler auditoria para core: {e}")
+        print(f"Error reading audit for core: {e}")
         return
     if not history:
         return
@@ -539,8 +539,8 @@ def generate_user_core():
             pass
 
     today_str = datetime.now().strftime("%Y-%m-%d")
-    history_text, _dias_ok, _dias_tot = compact_history(history)
-    print(f"[Memoria] historico compacto: {_dias_ok}/{_dias_tot} dias ({len(history_text)} chars)")
+    history_text, _days_ok, _days_total = compact_history(history)
+    print(f"[Memory] compact history: {_days_ok}/{_days_total} days ({len(history_text)} chars)")
 
     prompt_text = (
         f"Você é a mente de CONSOLIDAÇÃO de longo prazo do {USER_NAME}. Mantém um arquivo "
@@ -548,7 +548,7 @@ def generate_user_core():
         f"('user-memory.md', janela de 30 dias que decai por tempo), o CORE guarda fatos "
         f"ESTÁVEIS que persistem por meses e só mudam por CONTRADIÇÃO — nunca por idade.\n\n"
         f"NÚCLEO ATUAL (preserve; é a memória já consolidada):\n{existing_core}\n\n"
-        f"HISTÓRICO (auditorias, {_dias_ok} dias) para minerar:\n{history_text}\n\n"
+        f"HISTÓRICO (auditorias, {_days_ok} dias) para minerar:\n{history_text}\n\n"
         f"REGRAS DE CONSOLIDAÇÃO:\n"
         f"1. PRESERVAÇÃO: mantenha TODOS os fatos do núcleo atual, A NÃO SER que algo novo os "
         f"contradiga. NÃO apague por estar velho — só por estar ERRADO ou SUPERADO.\n"
@@ -567,10 +567,10 @@ def generate_user_core():
         f"8. SAÍDA: responda APENAS com o Markdown final, sem cercas de código, sem introdução."
     )
 
-    print("Consolidando memória de longo prazo (core) via DeepSeek...")
+    print("Consolidating long-term memory (core) via DeepSeek...")
     core_md = call_deepseek_text(prompt_text)
     if not core_md:
-        print("DeepSeek sem resposta para core. Tentando Gemini...")
+        print("DeepSeek returned nothing for core. Trying Gemini...")
         core_md = call_gemini(prompt_text)
 
     if core_md:
@@ -583,9 +583,9 @@ def generate_user_core():
         core_md = core_md.strip()
         with open(core_file, 'w', encoding='utf-8') as f:
             f.write(core_md)
-        print(f"Memória de longo prazo atualizada com sucesso em {core_file}")
+        print(f"Long-term memory updated in {core_file}")
     else:
-        print("Falha ao consolidar a memória de longo prazo.")
+        print("Failed to consolidate long-term memory.")
 
 if __name__ == "__main__":
     import sys

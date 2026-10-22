@@ -3,8 +3,8 @@ import json
 from datetime import datetime
 import requests
 
-# Identidade injetada por scripts/promote.py — o mirror OSS não carrega
-# nome de pessoa nem persona hardcoded.
+# Identity injected by scripts/promote.py — the OSS mirror carries no
+# hardcoded person name or persona.
 USER_NAME = os.environ.get("USER_NAME", "the user")
 PERSONA_NAME = os.environ.get("PERSONA_NAME", "the auditor")
 MEMORY_SKILL = os.environ.get("MEMORY_SKILL", "").strip()
@@ -44,7 +44,7 @@ def call_gemini(prompt_text):
 
 def generate_weekly_digest():
     if not os.path.exists(DAILY_FILE):
-        print("daily_audit.json não existe — sem dados pra digerir.")
+        print("daily_audit.json does not exist — nothing to digest.")
         return None
 
     with open(DAILY_FILE, "r", encoding="utf-8") as f:
@@ -52,7 +52,7 @@ def generate_weekly_digest():
 
     last7 = history[:7]
     if not last7:
-        print("Histórico vazio.")
+        print("History is empty.")
         return None
 
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -77,7 +77,7 @@ def generate_weekly_digest():
 
     prompt = (
         "Você é {PERSONA_NAME} em modo ANÁLISE SEMANAL — uma camada acima do audit diário. "
-        "{USER_NAME} (macaco sênior, MSP, neurodivergente) recebe esses audits diariamente. Agora você vai sintetizar a SEMANA — não repetir os dias, mas REVELAR PADRÃO TRANSVERSAL.\n\n"
+        "{USER_NAME} (macaco sênior, MSP) recebe esses audits diariamente. Agora você vai sintetizar a SEMANA — não repetir os dias, mas REVELAR PADRÃO TRANSVERSAL.\n\n"
         f"PERÍODO: {period_start} → {period_end}\n\n"
         "AUDITS DIÁRIOS DA SEMANA:\n"
         f"{blob}\n\n"
@@ -108,21 +108,21 @@ def generate_weekly_digest():
     )
 
     try:
-        print("Gerando weekly digest via DeepSeek...")
+        print("Generating weekly digest via DeepSeek...")
         raw = call_deepseek(prompt)
         if not raw:
             raw = call_gemini(prompt)
         if not raw:
-            raise Exception("Nenhuma API respondeu.")
+            raise Exception("No LLM API responded.")
         raw = raw.replace("```json", "").replace("```", "").strip()
         digest = json.loads(raw)
         digest["days_count"] = len(last7)
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             json.dump(digest, f, indent=2, ensure_ascii=False)
-        print(f"Weekly digest salvo em {OUTPUT_FILE}")
+        print(f"Weekly digest saved to {OUTPUT_FILE}")
         return digest
     except Exception as e:
-        print(f"Erro no weekly digest: {e}")
+        print(f"Weekly digest error: {e}")
         return None
 
 

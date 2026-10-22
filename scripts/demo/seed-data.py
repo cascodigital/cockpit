@@ -184,7 +184,7 @@ def make_daily_audit_entry(date, day_chats):
     unique_cats = len(set(cats_today))
     focus_score = max(2, 10 - unique_cats * 2)
 
-    skippy_lines = [
+    persona_lines = [
         ("Another day where the meatsack pretended to multitask",
          "The primate spent the morning context-switching between {a} and {b}, then crashed in {dom} for the afternoon. Standard.",
          "Pattern: every time {a} got hard, the protoplasm jumped to {b}. Avoidance, not exploration.",
@@ -201,7 +201,7 @@ def make_daily_audit_entry(date, day_chats):
          "Spent 40 minutes choosing a tool before installing any of the candidates.",
          "Output exists. Direction questionable."),
     ]
-    template = random.choice(skippy_lines)
+    template = random.choice(persona_lines)
     other_cats = [c for c in unique_cats and set(cats_today) - {dominant} or set()]
     a = random.choice(list(set(cats_today) - {dominant})) if len(set(cats_today)) > 1 else dominant
     b = random.choice(list(set(cats_today) - {dominant, a})) if len(set(cats_today)) > 2 else a
@@ -378,7 +378,7 @@ def main():
         "- pgvector over dedicated vector DBs until the corpus outgrows it\n"
         "- No paid SaaS monitoring — self-hosted Prometheus + Grafana\n"
     )
-    (ai_config / "user-memoria.md").write_text(
+    (ai_config / "user-memory.md").write_text(
         "# Last 30 days\n"
         "- RAG pipeline draft now runs end-to-end; retrieval quality still untuned\n"
         "- Postgres migration shipped with the three-step safe pattern\n"
@@ -412,7 +412,7 @@ def main():
     print(f"  - {data_dir}/memory_profile.json")
     print(f"  - {data_dir}/weekly_digest.json")
     print(f"  - {data_dir}/brain/journal/ ({len(journal_days)} days)")
-    print(f"  - {data_dir}/ai_config/ (user-core.md, user-memoria.md)")
+    print(f"  - {data_dir}/ai_config/ (user-core.md, user-memory.md)")
     print(f"  - {data_dir}/chatgpt_site/, {data_dir}/claude_site/ (WEB captures)")
 
 

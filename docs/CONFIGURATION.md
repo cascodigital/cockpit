@@ -20,17 +20,20 @@ All runtime knobs are environment variables. The full set:
 | `DEEPSEEK_API_KEY` | — | Primary LLM for audits/digests. Cheap, JSON-mode reliable |
 | `GEMINI_API_KEY` | — | Fallback LLM, AND the embeddings provider for semantic search |
 | `OPENAI_API_KEY` | — | Optional. Enables LLM reranking + `/api/ask` |
-| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Any OpenAI-compatible server. Setting it (even without a key) enables rerank/ask — e.g. Ollama `http://host:11434/v1` |
 | `RERANK_MODEL` | `gpt-4o-mini` | Model used for reranking |
 | `RERANK_TOP` | `30` | Number of top candidates reranked per query |
 | `ASK_MODEL` | `gpt-4o-mini` | Model answering `/api/ask` |
 | `ASK_CHAR_BUDGET` | `90000` | Max journal characters sent as `/api/ask` context |
 | `ASK_RECENT_DAYS` | `5` | Newest journal days always included in the context |
+| `USER_NAME` | `the user` | Name interpolated into the audit/memory prompts |
+| `PERSONA_NAME` | `the auditor` | Persona name interpolated into the audit/memory prompts |
+| `DATA_DIR` | `/app/data` | Data root for the auditor/distiller scripts (the server itself uses `/app/data`) |
 
 Everything degrades independently: with no keys at all you keep indexing, BM25
 search, the journal panel and the whole UI. `GEMINI_API_KEY` adds embeddings;
-DeepSeek/Gemini add nightly audits; an OpenAI-compatible endpoint adds
-reranking and ask.
+DeepSeek/Gemini add nightly audits; `OPENAI_API_KEY` adds reranking and ask.
+Rerank and ask call `https://api.openai.com/v1` directly; the endpoint is not
+configurable in the current code.
 
 Reranking is optional. Without an LLM, `/api/search` returns the RRF-fused
 order unchanged. When enabled, the top `RERANK_TOP` candidates are reordered by
@@ -53,8 +56,8 @@ the journal, citing the dates it used. The context is assembled RAG-lite: the
 `ASK_RECENT_DAYS` newest days always enter, older days only when they match the
 question's terms, capped at `ASK_CHAR_BUDGET`.
 
-To try it without any account: `python scripts/demo/mock-llm.py` and set
-`OPENAI_BASE_URL=http://localhost:9999` (or a real local Ollama).
+`scripts/demo/mock-llm.py` is an OpenAI-compatible stub for keyless testing; using
+it requires a configurable base URL, which the current server code does not have.
 
 ## Memory distiller (`app/memory_distiller.py`)
 
@@ -90,10 +93,10 @@ The sidebar's "All skills" filter is driven by `SKILLS_MAP` in
 SKILLS_MAP = {
     'coding':   {'icon': '💻', 'name': 'Coding'},
     'writing':  {'icon': '✍️', 'name': 'Writing'},
-    'research': {'icon': '🔬', 'name': 'Research'},
-    'planning': {'icon': '🗺️', 'name': 'Planning'},
 }
 ```
+
+(The shipped map lists the author's own skill slugs; replace it with yours.)
 
 Edit freely. The keys are slugs you send to `POST /api/skill_log` before
 running an AI session — e.g. a wrapper script around `claude` could tag the
@@ -104,15 +107,15 @@ harmless.
 
 ### Categories (daily audit)
 
-The LLM is constrained to a fixed category vocabulary in the daily-audit
-prompt:
+The LLM is constrained to a fixed (Portuguese) category vocabulary in the
+daily-audit prompt:
 
 ```
-Dev, Infra, AI, Writing, Research, Admin, Personal, Health, Finance, Learning, Other
+Infra, Suporte-MSP, Finanças, Saúde, Casco-Negócio, Dev, IA-Tooling, Pessoal, Trading, Aprendizado
 ```
 
-To customize, edit `prompt_text` in `app/daily_auditor.py` (look for "CATEGORY
-VOCABULARY"). Also update the fallback classifier `_classifyChatFallback()` in
+To customize, edit `prompt_text` in `app/daily_auditor.py` (look for "REGRAS DE
+CATEGORIA"). Also update the fallback classifier `_classifyChatFallback()` in
 `app/cockpit.py` so the heatmap renders old entries that lack `categories`.
 
 The heatmap auto-discovers whatever categories show up — no UI change needed
@@ -120,13 +123,14 @@ beyond the prompt edit.
 
 ## Persona
 
-The auditor and distillers share a sarcastic Elder AI persona ("Skippy"). It's
-hardcoded in the three `prompt_text` blocks. To swap:
+The auditor and distillers share a sarcastic AI persona, named by
+`PERSONA_NAME`. Its tone rules are hardcoded in the prompt blocks of
+`daily_auditor.py`, `weekly_digest.py` and `memory_distiller.py`. To swap:
 
 1. Replace the persona description and TONE RULES sections.
 2. Keep the JSON FORMAT block exactly the same — the UI parses it.
 
-Suggested neutral version (if you find Skippy grating):
+Suggested neutral version:
 
 ```
 You are a behavioral analyst reading the user's AI chat logs.
@@ -146,11 +150,11 @@ data/
 ├── gemini/<client_name>/chats/          # normalized .json, pushed by gemini_sync.sh
 ├── chatgpt_site/ gemini_site/ claude_site/  # optional web captures (machine=WEB)
 ├── brain/journal/                       # optional distilled-notes vault (BRAIN_DATA)
-├── ai_config/user-core.md               # optional: permanent injected-memory layer
-├── ai_config/user-memoria.md            # optional: recent injected-memory layer
+├── ai_config/user-core.md               # permanent injected-memory layer
+├── ai_config/user-memory.md             # recent injected-memory layer (30-day window)
 ├── search_index.json                    # embeddings cache
 ├── skill_log.jsonl                      # tags from POST /api/skill_log
-├── daily_audit.json                     # rolling 14-day audit history
+├── daily_audit.json                     # rolling 30-day audit history
 ├── weekly_digest.json                   # last weekly digest
 └── memory_profile.json                  # long-term distilled profile
 ```

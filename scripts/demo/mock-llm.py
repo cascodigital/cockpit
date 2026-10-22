@@ -6,10 +6,10 @@ markdown answer derived from the prompt. Lets you exercise the Ask-the-
 Panopticon button and the LLM reranker without any API key:
 
     python scripts/demo/mock-llm.py --port 9999
-    # in .env:  OPENAI_BASE_URL=http://host.docker.internal:9999
 
-This is a demo stub — for a real keyless setup point OPENAI_BASE_URL at an
-actual local server (Ollama: http://host:11434/v1, LM Studio, vLLM...).
+Note: the current app/cockpit.py sends rerank/ask requests to the fixed
+https://api.openai.com/v1 endpoint, so pointing the server at this stub requires
+re-adding a configurable base URL (an earlier OPENAI_BASE_URL option was removed).
 """
 import argparse
 import json

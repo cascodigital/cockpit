@@ -4,8 +4,8 @@ import glob
 from datetime import datetime, timezone, timedelta
 import requests
 
-# Identidade injetada por scripts/promote.py — o mirror OSS não carrega
-# nome de pessoa nem persona hardcoded.
+# Identity injected by scripts/promote.py — the OSS mirror carries no
+# hardcoded person name or persona.
 USER_NAME = os.environ.get("USER_NAME", "the user")
 PERSONA_NAME = os.environ.get("PERSONA_NAME", "the auditor")
 MEMORY_SKILL = os.environ.get("MEMORY_SKILL", "").strip()
@@ -20,8 +20,8 @@ SKILL_LOG_PATH = os.path.join(DATA_DIR, "skill_log.jsonl")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 
-# Legado: matching por keyword no blob inteiro caçava o registry de skills (94 falsos p/ "skpsi").
-# Verdade-terra agora é o skill_log (ativações REAIS do skpsi). Mantido só p/ referência.
+# Legacy: keyword matching over the whole blob kept hitting the skill registry (94 false
+# positives for "skpsi"). Ground truth is now skill_log (REAL activations). Kept for reference only.
 LUDOVICO_KEYWORDS = ["skpsi", "leto ii", "ludovico von drake"]
 BRT = timezone(timedelta(hours=-3))
 
@@ -41,8 +41,8 @@ def get_last_updated(dna):
         return None
 
 def _to_utc(s):
-    """Normaliza timestamp p/ UTC aware. Chats vêm em ...Z (UTC); skill_log vem local
-    (-03:00, alguns sem offset → assume BRT)."""
+    """Normalize a timestamp to aware UTC. Chats come as ...Z (UTC); skill_log is local
+    (-03:00, some without offset → assume BRT)."""
     s = str(s).strip()
     if not s:
         return None
@@ -80,11 +80,11 @@ def _load_skpsi_activations():
     return acts
 
 def get_new_psi_chats(since_dt):
-    """Sessoes skpsi REAIS, casadas com o skill_log por janela de tempo. Zero ruido de keyword.
-    Uma sessao conta se seu startTime cai perto de uma ativacao skpsi do MESMO agente."""
+    """REAL MEMORY_SKILL sessions, matched against skill_log by time window. No keyword noise.
+    A session counts if its startTime falls near a skill activation from the SAME agent."""
     acts = _load_skpsi_activations()
-    WIN_BACK = timedelta(minutes=5)   # tolerancia de clock skew
-    WIN_FWD = timedelta(minutes=30)   # sessao comeca logo apos a ativacao
+    WIN_BACK = timedelta(minutes=5)   # clock-skew tolerance
+    WIN_FWD = timedelta(minutes=30)   # session starts right after activation
 
     def is_psi(start_utc, source):
         for a in acts.get(source, []):
@@ -93,8 +93,8 @@ def get_new_psi_chats(since_dt):
         return False
 
     chats = []
-    seen = set()  # dedup: glob recursivo conta o mesmo arquivo 2x
-    # Codex ignorado intencionalmente (alto falso-positivo com skacoes/trading)
+    seen = set()  # dedup: recursive glob can count the same file twice
+    # Codex intentionally skipped (high false-positive rate from trading sessions)
     for source, dirp, patt in [("gemini", GEMINI_DIR, "**/*.json"), ("claude", CLAUDE_DIR, "*.json")]:
         for f in glob.glob(os.path.join(dirp, patt), recursive=True):
             rf = os.path.realpath(f)
@@ -136,8 +136,8 @@ def build_prompt(chats, existing_dna):
     existing_hw = json.dumps(existing_dna.get("pending_homework", []), ensure_ascii=False)
 
     return (
-        "Voce e o Arquiteto de Memoria do Prof. MemoryProfile Von Drake (psicologo TCC do Andre).\n"
-        "Andre e Engenheiro MSP Senior, neurodivergente (Asperger), hipercritico, pessimista treinado.\n\n"
+        "Voce e o Arquiteto de Memoria do Prof. MemoryProfile Von Drake (psicologo TCC do usuario).\n"
+        "O usuario e Engenheiro MSP Senior, hipercritico, pessimista treinado.\n\n"
         "LOGS DA SESSAO PARA ANALISE:\n"
         f"{full_text[:25000]}\n\n"
         "BUGS COGNITIVOS JA REGISTRADOS (nao repetir, apenas complementar se houver novos):\n"
@@ -154,7 +154,7 @@ def build_prompt(chats, existing_dna):
         "(APENAS tarefas de vida/comportamento, NUNCA ferramentas tecnicas, CLIs ou configuracoes). "
         "Se nenhum novo homework foi definido, retorne lista vazia [].\n"
         "4. session_summary: resumo em 3-5 frases da sessao: temas abordados, bugs trabalhados, estado emocional do paciente, o que ficou pendente.\n"
-        "5. emotional_state: estado emocional atual do Andre em uma frase curta.\n"
+        "5. emotional_state: estado emocional atual do usuario em uma frase curta.\n"
         "6. energy_level: nivel de energia atual em uma frase curta.\n"
         "Responda APENAS o JSON puro, sem markdown."
     )
@@ -187,34 +187,34 @@ def distill_memory():
 
     chats = get_new_psi_chats(since_dt)
     if not chats:
-        print(f"[MemoryProfile] Nenhuma sessao psi nova desde {since_dt}. DNA inalterado.")
+        print(f"[MemoryProfile] No new sessions since {since_dt}. Profile unchanged.")
         return
 
-    print(f"[MemoryProfile] {len(chats)} sessao(es) nova(s) para processar.")
+    print(f"[MemoryProfile] {len(chats)} new session(s) to process.")
     prompt = build_prompt(chats, existing_dna)
 
     raw_json = None
     try:
-        print("[MemoryProfile] Tentando DeepSeek...")
+        print("[MemoryProfile] Trying DeepSeek...")
         raw_json = call_deepseek(prompt)
     except Exception as e:
-        print(f"[MemoryProfile] DeepSeek falhou: {e}. Tentando Gemini...")
+        print(f"[MemoryProfile] DeepSeek failed: {e}. Trying Gemini...")
         try:
             raw_json = call_gemini(prompt)
         except Exception as e2:
-            print(f"[MemoryProfile] Gemini falhou: {e2}. DNA inalterado.")
+            print(f"[MemoryProfile] Gemini failed: {e2}. Profile unchanged.")
             return
 
     if not raw_json:
-        print("[MemoryProfile] Sem resposta das APIs. DNA inalterado.")
+        print("[MemoryProfile] No response from the APIs. Profile unchanged.")
         return
 
     raw_json = raw_json.replace("```json", "").replace("```", "").strip()
     delta = json.loads(raw_json)
 
-    # --- MERGE INCREMENTAL ---
+    # --- INCREMENTAL MERGE ---
 
-    # 1. Arquivar sessao anterior no historico (max 10)
+    # 1. Archive the previous session into history (max 10)
     prev_summary = existing_dna.get("last_session_summary", "")
     if prev_summary and "Sem sessao" not in prev_summary:
         history = existing_dna.get("session_history", [])
@@ -224,14 +224,14 @@ def distill_memory():
         })
         existing_dna["session_history"] = history[-10:]
 
-    # 2. Merge bugs: adicionar novos, manter existentes
+    # 2. Merge bugs: add new ones, keep existing
     current_bugs = existing_dna.get("recurring_bugs", [])
     for bug in delta.get("new_bugs", []):
         if bug and bug not in current_bugs:
             current_bugs.append(bug)
     existing_dna["recurring_bugs"] = current_bugs
 
-    # 3. Merge homework: remover concluidos, adicionar novos
+    # 3. Merge homework: remove completed, add new
     current_hw = existing_dna.get("pending_homework", [])
     resolved = delta.get("resolved_homework", [])
     current_hw = [h for h in current_hw if h not in resolved]
@@ -240,7 +240,7 @@ def distill_memory():
             current_hw.append(hw)
     existing_dna["pending_homework"] = current_hw
 
-    # 4. Atualizar estado e resumo
+    # 4. Update state and summary
     dna = existing_dna.get("personality_dna", {})
     if delta.get("emotional_state"):
         dna["emotional_state"] = delta["emotional_state"]
@@ -252,7 +252,7 @@ def distill_memory():
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(existing_dna, f, indent=2, ensure_ascii=False)
-    print(f"[MemoryProfile] DNA atualizado com merge incremental. Bugs: {len(current_bugs)}, HW: {len(current_hw)}.")
+    print(f"[MemoryProfile] Profile updated (incremental merge). Bugs: {len(current_bugs)}, HW: {len(current_hw)}.")
 
 if __name__ == "__main__":
     distill_memory()

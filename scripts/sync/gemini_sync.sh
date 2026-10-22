@@ -1,7 +1,7 @@
 #!/bin/bash
 # Sync Gemini CLI session logs (~/.gemini/tmp/) -> Cockpit server.
 # Converts .jsonl into the structured .json shape Cockpit indexes.
-# Example cron: */5 * * * * /path/to/cockpit-oss/scripts/sync/gemini_sync.sh
+# Example cron: */5 * * * * /path/to/cockpit/scripts/sync/gemini_sync.sh
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

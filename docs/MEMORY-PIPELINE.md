@@ -85,7 +85,7 @@ and the profile silently never updates.
 
 ## Which day does a chat belong to?
 
-The audit runs at 03:05 and audits **yesterday** (`daily_auditor.py` with no argument
+The audit runs once a day from an external scheduler (03:05 in the reference setup) and audits **yesterday** (`daily_auditor.py` with no argument
 defaults to `now - 1 day`). Passing a date audits that date instead, which makes
 catch-up possible after an outage:
 
@@ -160,7 +160,7 @@ a byte offset hands the model invalid JSON and a window it believes is complete.
 
 ## Operational notes
 
-- **Deploys are a file copy.** `/srv/dockers/cockpit/app` is bind-mounted to `/app`.
+- **Deploys are a file copy.** The host's `app/` directory is bind-mounted to `/app`.
   Editing the host file *is* editing production. The auditor is exec'd as a fresh
   process every run, so it needs no restart — and restarting costs a full reindex.
 - **Filename bridge.** The HTTP endpoints read `user-core.md` / `user-memory.md`, while
