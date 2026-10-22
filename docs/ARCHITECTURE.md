@@ -36,6 +36,19 @@ chat), and sends the result to DeepSeek (primary) or Gemini (fallback) with a
 persona prompt that returns structured JSON. The entry is upserted into a rolling
 30-day history in `data/daily_audit.json`, then `generate_user_memory()` and
 `generate_user_core()` refresh the injected-memory files under `data/ai_config/`.
+Before saving, `open_threads` items from no-pending sessions are dropped and audit
+days older than 14 days lose their `open_threads`; the `## Pendências ativas`
+section of `user-memory.md` is built by `build_pendencias_block()` in code, not by
+the LLM (see [MEMORY-PIPELINE.md](MEMORY-PIPELINE.md#how-a-pending-item-dies)).
+All DeepSeek calls use `DEEPSEEK_MODEL` (default `deepseek-flash`) with thinking
+mode disabled.
+
+### `app/pendencias.py` — the pending-item CLI
+
+Lists the active pending items exactly as they are injected
+(`python /app/pendencias.py`) and kills items by number
+(`python /app/pendencias.py mata 2 5`), rewriting the section of `user-memory.md`
+in place without an LLM call.
 
 The prompt expects strict JSON shape (see `app/daily_auditor.py` for the full
 schema). The UI's dashboard renders this directly — change the schema and the
@@ -54,7 +67,9 @@ Selects Gemini + Claude sessions whose start time falls within a window after a
 `MEMORY_SKILL` activation recorded via `POST /api/skill_log`, sends them to
 DeepSeek/Gemini, and merges the result incrementally into
 `data/memory_profile.json` (recurring patterns, open homework, latest session
-summary). Codex is intentionally skipped because of false positives.
+summary). Codex is intentionally skipped because of false positives. It returns
+a status string that the index worker logs (`no-new-session`, `api-error` or
+`updated (...)`).
 
 ### `scripts/sync/*.sh` — the ingest layer
 

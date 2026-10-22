@@ -116,22 +116,51 @@ A session that crosses midnight counts on both days, on purpose.
 items are immortal: they reappear every day forever, and the memory file fills with
 work that finished weeks ago.
 
-Two mechanisms prevent that, and both are required:
+Asking the LLM to obey close rules was not enough: the memory model kept listing
+items that had closed or that were weeks old. The pending list is therefore built
+**by code**, and the LLM only feeds it raw material:
 
-1. **`ops_brief.resolved_threads`** — the daily audit must record what *closed*, with
+1. **Birth criteria** — the audit prompt only allows an `open_threads` item that has
+   a concrete action *and* a verifiable close condition written as a
+   `[fecha quando: ...]` ("closes when") suffix, prefixed with the source chat number
+   (`[#3] ...`). Passive watch items ("Monitorar", "Acompanhar", "Aguardar"...) are
+   forbidden, and at most 5 items per day are accepted. When in doubt, nothing opens:
+   a real problem resurfaces in tomorrow's logs, a phantom one never leaves.
+
+2. **`ops_brief.resolved_threads`** — the daily audit must record what *closed*, with
    the evidence inline. The evidence bar is deliberately high: a command's output, a
    passing test, a service responding, or the user saying it worked. Intent ("I'll
-   fix X", "now just run it") does not count. When in doubt the item stays open —
-   closing early removes a real problem from view, which is worse than repeating it.
+   fix X", "now just run it") does not count.
 
-2. **Cumulative subtraction** — `generate_user_memory()` scans `resolved_threads`
-   across *every* day in the history, not just the newest. An item opened on the 3rd
-   and closed on the 7th is dead, even though it appears in `open_threads` on days 3
-   through 6. Only two things survive: what was never resolved, and what was resolved
-   and then reopened *later* than its closure.
+3. **Deterministic block** — `build_pendencias_block()` (in `daily_auditor.py`) reads
+   the `open_threads` of the last 10 days, keeps only items with a close condition,
+   groups rewordings of the same item by word similarity (Jaccard >= 0.4), and drops a
+   group when a `resolved_threads` entry from the same day or later covers it (>= 50%
+   of its words, or the same ticket ID such as `SUP-123`). Up to 10 survivors are
+   written with their birth date into the `## Pendências ativas` section of
+   `user-memory.md`; the LLM is told not to write that section at all, and any it
+   writes is stripped.
 
-Surviving items are written with their birth date (`opened on 2026-08-04`). A pending
-item without an age is a pending item nobody audits.
+4. **Hard TTL** — `expire_open_threads()` empties `open_threads` on audit days older
+   than 14 days, so an item the model keeps re-emitting cannot live forever.
+
+5. **Manual kill** — `pendencias.py` lists the active items and `pendencias.py mata N`
+   ("kill") marks item N as dead in `ai_config/pendencias-mortas.json`. Killed items,
+   and later rewordings of them, stay out of every future block:
+
+   ```bash
+   docker exec cockpit python /app/pendencias.py
+   docker exec cockpit python /app/pendencias.py mata 2 5
+   ```
+
+6. **No-pending sessions** — skills listed in `NO_PENDING_SKILLS` (for example client
+   work that already has its own ticket queue) never create pending items. The skill
+   launcher appends `<agent> <timestamp> <skill> [session-id]` lines to
+   `ai_config/sessoes-sem-pendencia.txt`; `_marcar_sem_pendencia()` matches Claude
+   sessions by session ID, Codex sessions by the `name:` frontmatter of the injected
+   SKILL.md, and Gemini sessions by a launch within 10 minutes before the first message.
+   Those chats are tagged `[SEM PENDÊNCIAS]` in the prompt and any `open_threads` item
+   citing them is dropped after the LLM answers.
 
 For any of this to work, the recent-audit context handed to the model must carry
 `open_threads` and `resolved_threads`. If it doesn't, the close rule is dead letter.
@@ -166,6 +195,14 @@ a byte offset hands the model invalid JSON and a window it believes is complete.
 - **Filename bridge.** The HTTP endpoints read `user-core.md` / `user-memory.md`, while
   the generators write locally-named files; symlinks bridge the two. A restore that
   does not preserve symlinks will 404 the memory panel with no other symptom.
+- **Status, not optimism.** `memory_distiller.distill_memory()` returns a status
+  (`no-new-session`, `api-error`, `updated (...)`) and the index worker logs it. It
+  used to log "Profile updated." on every run, including runs that changed nothing.
+- **Core size is enforced.** `generate_user_core()` estimates tokens (`chars / 4`);
+  above 1.4x the 500-token limit it asks the model once more to cut, and keeps the
+  retry only if it is shorter. Technical configuration (IPs, ports, versions, cron,
+  model assignments) is excluded from the core by prompt rule, because it belongs in
+  the canonical `.md` docs under `ai_config/`, which win on conflict.
 - **The repo is generated.** See [`scripts/promote.py`](../scripts/promote.py):
   production is the source of truth for code, this mirror is a sanitized artifact, and
   the direction is one-way. Publishing the mirror over production regresses it.

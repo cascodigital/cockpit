@@ -10,6 +10,8 @@ services:
       - ./data:/app/data
       # Optional: mount a distilled-notes vault (see BRAIN_DATA in .env.example)
       # - /path/to/your/brain:/app/data/brain:ro
+      # Optional: host-side package directory (see PYTHONPATH below)
+      # - ./pydeps:/pydeps
     environment:
       PORT: 8000
       TZ: ${TZ:-UTC}
@@ -23,6 +25,7 @@ services:
       BRAIN_DATA: /app/data/brain
       INDEX_INTERVAL: ${INDEX_INTERVAL:-150}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-flash}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
@@ -32,6 +35,13 @@ services:
       ASK_CHAR_BUDGET: ${ASK_CHAR_BUDGET:-90000}
       ASK_RECENT_DAYS: ${ASK_RECENT_DAYS:-5}
       MEMORY_SKILL: ${MEMORY_SKILL:-}
+      NO_PENDING_SKILLS: ${NO_PENDING_SKILLS:-}
+      # Optional: extra Python packages installed into a host directory instead of
+      # the image (pip install --target ./pydeps ...), then mount it and uncomment:
+      # PYTHONPATH: /pydeps
       PYTHONUNBUFFERED: "1"
     command: python cockpit.py
+    # Optional: cap memory. The embeddings index lives in RAM; a few GB covers
+    # thousands of sessions.
+    # mem_limit: 2560m
     restart: unless-stopped

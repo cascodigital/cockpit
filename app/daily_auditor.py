@@ -26,6 +26,9 @@ OUTPUT_FILE = os.path.join(DATA_DIR, "daily_audit.json")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
+# DeepSeek model for every audit/memory call. Thinking (reasoning) mode is disabled:
+# these are structured summarization tasks and reasoning only adds latency and cost.
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
 
 def _brt_date(ts):
     """ISO timestamp (UTC, Z suffix) -> BRT date 'YYYY-MM-DD'. None if unparseable.
@@ -160,7 +163,8 @@ def call_deepseek(prompt_text):
     url = "https://api.deepseek.com/chat/completions"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
     data = {
-        "model": "deepseek-chat",
+        "model": DEEPSEEK_MODEL,
+        "thinking": {"type": "disabled"},
         "messages": [{"role": "user", "content": prompt_text}],
         "response_format": {"type": "json_object"}
     }
@@ -176,8 +180,263 @@ def call_gemini(prompt_text):
     response.raise_for_status()
     return response.json()['candidates'][0]['content']['parts'][0]['text']
 
+OPEN_THREAD_TTL_DAYS = 14
+
+
+def expire_open_threads(history, today_str, ttl_days=OPEN_THREAD_TTL_DAYS):
+    """Hard prune of `open_threads` — the only one that does not depend on the LLM cooperating.
+
+    The prompt re-injects the last 7 days of `open_threads`, so the model re-emits the
+    pending item with today's date and it never ages: the 30-day retention re-stamps it
+    instead of expiring it. `resolved_threads` was supposed to kill it, but that requires
+    the close to be worded EXACTLY like the day it was born — and the model rewrites the
+    sentence every time, so the match almost never happens.
+
+    Here an item disappears by AGE, without anyone having to prove it died: once it is
+    older than `ttl_days` without being re-emitted with new text, it is dropped. If the
+    problem is real, tomorrow's logs bring it back.
+    """
+    from datetime import date
+
+    def _d(s):
+        try:
+            y, m, dd = (int(x) for x in str(s).split("-"))
+            return date(y, m, dd)
+        except Exception:
+            return None
+
+    today = _d(today_str)
+    if not today:
+        return 0
+
+    pruned = 0
+    for entry in history:
+        day = _d(entry.get("date"))
+        if not day or (today - day).days <= ttl_days:
+            continue
+        brief = entry.get("ops_brief") or {}
+        open_items = brief.get("open_threads") or []
+        if open_items:
+            pruned += len(open_items)
+            brief["open_threads"] = []
+    if pruned:
+        print(f"expire_open_threads: {pruned} pending item(s) expired by age (>{ttl_days}d)")
+    return pruned
+
+
+PENDENCIAS_MAX = 10
+PENDENCIAS_JANELA_DIAS = 10  # look-back window (days) for the active pending list
+# Items killed by hand via `pendencias.py mata N`. File name is shared with production.
+PENDENCIAS_MORTAS_FILE = os.path.join(DATA_DIR, "ai_config", "pendencias-mortas.json")
+# Passive-watch openers (Portuguese, matched against LLM output): never a real pending item.
+PENDENCIAS_PASSIVAS = ("monitorar", "acompanhar", "aguardar", "observar", "ficar de olho")
+
+
+def build_pendencias_block(history, today_str, ttl_days=None, max_itens=PENDENCIAS_MAX, itens=False):
+    """Build the '## Pendências ativas' (active pending items) block in Python, no LLM.
+
+    The memory LLM used to receive the rules (ratchet, cumulative close, TTL) and did not
+    obey them: one day it listed 15 items, some of them weeks old and no longer present in
+    `open_threads`, plus items owned by third parties. Here the list comes from the
+    `open_threads` of the last `ttl_days` (its own window, shorter than the history TTL).
+    The same pending item reworded on different days is grouped by word similarity, and it
+    dies if a `resolved_threads` entry from the same day or later matches it (by words or
+    by the same ticket ID, e.g. SUP-191).
+    Items the user killed in chat also die (`pendencias.py mata N` writes them to
+    PENDENCIAS_MORTAS_FILE). `itens=True` returns the list of texts instead of the block.
+    """
+    import re
+    import unicodedata
+    from datetime import date
+
+    ttl_days = PENDENCIAS_JANELA_DIAS if ttl_days is None else ttl_days
+
+    def _d(s):
+        try:
+            y, m, dd = (int(x) for x in str(s).split("-"))
+            return date(y, m, dd)
+        except Exception:
+            return None
+
+    def _toks(txt):
+        # Drop the "[fecha quando: ...]" (closes when) suffix, strip accents, keep words >= 4 chars.
+        txt = re.split(r"\[\s*fecha quando", txt, flags=re.I)[0]
+        txt = unicodedata.normalize("NFKD", txt.lower())
+        txt = "".join(c for c in txt if not unicodedata.combining(c))
+        return {w for w in re.findall(r"[a-z0-9][a-z0-9._/-]{3,}", txt)}
+
+    def _ids(txt):
+        return set(re.findall(r"\b(?:SUP|IT|INC|RITM)-\d+\b", txt, flags=re.I))
+
+    def _jac(a, b):
+        return len(a & b) / len(a | b) if a and b else 0.0
+
+    def _covers(res, op):
+        # A resolved item is usually worded differently from the open one:
+        # measure how much of the OPEN item appears in it.
+        return len(res & op) / len(op) if op else 0.0
+
+    today = _d(today_str)
+    if not today:
+        return ""
+
+    groups = []    # {toks, texto, nasceu (born), visto (last seen), _op}
+    resolved = []  # (date, toks, ids)
+    for entry in history:
+        day = _d(entry.get("date"))
+        if not day or (today - day).days > ttl_days or day > today:
+            continue
+        brief = entry.get("ops_brief") or {}
+        for r in brief.get("resolved_threads") or []:
+            resolved.append((day, _toks(str(r)), _ids(str(r))))
+        for t in brief.get("open_threads") or []:
+            t = str(t).strip()
+            # Only items with an explicit close condition count (see the audit prompt).
+            if "fecha quando" not in t.lower():
+                continue
+            if t.lower().lstrip("(abc) ").startswith(PENDENCIAS_PASSIVAS):
+                continue
+            tk = _toks(t)
+            if not tk:
+                continue
+            target = max(groups, key=lambda g: _jac(g["toks"], tk), default=None)
+            if target and _jac(target["toks"], tk) >= 0.4:
+                if day >= target["visto"]:
+                    target.update(texto=t, visto=day, _op=tk)
+                target["toks"] |= tk
+                target["nasceu"] = min(target["nasceu"], day)
+            else:
+                groups.append({"toks": tk, "texto": t, "nasceu": day, "visto": day, "_op": tk})
+
+    killed = []
+    try:
+        with open(PENDENCIAS_MORTAS_FILE, encoding="utf-8") as mf:
+            for m in json.load(mf):
+                killed.append((_toks(m.get("texto", "")), _ids(m.get("texto", ""))))
+    except Exception:
+        pass
+
+    alive = []
+    for g in groups:
+        if any(_jac(kt, g["_op"]) >= 0.4 or (ki and ki & _ids(g["texto"])) for kt, ki in killed):
+            continue
+        ids = _ids(g["texto"])
+        dead = any(d >= g["visto"] and (_covers(rt, g["_op"]) >= 0.5 or (ids and ids & ri))
+                   for d, rt, ri in resolved)
+        if not dead:
+            alive.append(g)
+
+    alive.sort(key=lambda g: (g["visto"], g["nasceu"]), reverse=True)
+    alive = alive[:max_itens]
+    if itens:
+        return [g["texto"] for g in alive]
+    # Block text below is injected into the assistant's memory file (Portuguese, runtime).
+    if not alive:
+        return "## Pendências ativas\n\nNenhuma com ação e critério de fechamento nos últimos " \
+               f"{ttl_days} dias."
+    lines = [f"- {g['texto']} (aberta em {g['nasceu'].isoformat()})" for g in alive]
+    return "## Pendências ativas\n\n" + "\n".join(lines)
+
+
+# Skills whose sessions NEVER produce pending items (e.g. a client engagement that already
+# has its own ticket queue). Comma-separated skill names in NO_PENDING_SKILLS.
+# The skill launcher writes one line per session to SESSOES_SEM_PENDENCIA_FILE:
+# "<agent> <BRT timestamp> <skill> [session-id]".
+SKILLS_SEM_PENDENCIA = {s.strip() for s in os.environ.get("NO_PENDING_SKILLS", "").split(",") if s.strip()}
+SESSOES_SEM_PENDENCIA_FILE = os.path.join(DATA_DIR, "ai_config", "sessoes-sem-pendencia.txt")
+
+
+def _marcar_sem_pendencia(chats):
+    """Set chat['sem_pendencia'] = skill name when the chat came from a listed skill.
+
+    Claude: exact match on the --session-id generated by the launcher.
+    Codex: the SKILL.md goes raw into the first prompt, so its `name:` frontmatter gives it away.
+    AGY/Gemini: no session id; matches an agy launch of the skill up to 10 min before the
+    chat's first timestamp.
+    """
+    import re
+    if not SKILLS_SEM_PENDENCIA:
+        return chats
+    sids, agy = {}, []
+    try:
+        with open(SESSOES_SEM_PENDENCIA_FILE, encoding="utf-8") as f:
+            for ln in f:
+                p = ln.split()
+                if len(p) < 3 or p[2] not in SKILLS_SEM_PENDENCIA:
+                    continue
+                if p[0] == "claude" and len(p) >= 4:
+                    sids[p[3].lower()] = p[2]
+                elif p[0] == "agy":
+                    try:
+                        agy.append((datetime.fromisoformat(p[1]), p[2]))
+                    except Exception:
+                        pass
+    except FileNotFoundError:
+        pass
+
+    def _start_brt(msgs):
+        for m in msgs:
+            ts = str(m.get("timestamp") or "").strip()
+            if not ts:
+                continue
+            try:
+                dt = datetime.fromisoformat(ts[:-1] + "+00:00" if ts.endswith("Z") else ts)
+            except Exception:
+                continue
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(BRT).replace(tzinfo=None)
+        return None
+
+    for c in chats:
+        skill = None
+        if c["source"] == "claude":
+            m = re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", c["uid"].lower())
+            skill = sids.get(m.group(0)) if m else None
+        elif c["source"] == "codex":
+            for msg in c["messages"][:3]:
+                m = re.search(r"(?m)^name:\s*(\S+)", str(msg.get("content", "")))
+                if m and m.group(1) in SKILLS_SEM_PENDENCIA:
+                    skill = m.group(1)
+                    break
+        elif c["source"] == "gemini" and agy:
+            start = _start_brt(c["messages"])
+            if start:
+                cands = [(t, sk) for t, sk in agy if timedelta(0) <= start - t <= timedelta(minutes=10)]
+                if cands:
+                    skill = max(cands)[1]
+        if skill:
+            c["sem_pendencia"] = skill
+    return chats
+
+
+def _filtrar_open_threads(audit, chats):
+    """Apply the [#N] prefix the prompt requires on open_threads: drop items that came from
+    a no-pending chat. If the day has any no-pending chat, items without a valid prefix are
+    dropped too (their origin cannot be proven). The prefix is stripped from the saved text."""
+    import re
+    brief = audit.get("ops_brief") or {}
+    items = brief.get("open_threads") or []
+    forbidden = {i + 1 for i, c in enumerate(chats) if c.get("sem_pendencia")}
+    valid = set(range(1, len(chats) + 1))
+    out, cut = [], 0
+    for t in items:
+        t = str(t)
+        m = re.match(r"\s*\[#(\d+)\]\s*", t)
+        n = int(m.group(1)) if m else None
+        if (n in forbidden) or (forbidden and n not in valid):
+            cut += 1
+            continue
+        out.append(t[m.end():] if m else t)
+    if items:
+        brief["open_threads"] = out
+    if cut:
+        print(f"_filtrar_open_threads: {cut} pending item(s) dropped from no-pending sessions")
+    return audit
+
+
 def generate_daily_audit(target_str=None):
-    chats = get_todays_chats(target_str)
+    chats = _marcar_sem_pendencia(get_todays_chats(target_str))
     today_str = target_str or datetime.now().strftime("%Y-%m-%d")
     
     if not chats:
@@ -202,7 +461,8 @@ def generate_daily_audit(target_str=None):
 
     full_text = ""
     for idx, chat in enumerate(chats):
-        block = f"\n--- Chat UID: {chat['uid']} ({chat['source']}) ---\n"
+        tag = f" [SEM PENDÊNCIAS — {chat['sem_pendencia']}]" if chat.get("sem_pendencia") else ""
+        block = f"\n--- Chat #{idx + 1} UID: {chat['uid']} ({chat['source']}){tag} ---\n"
         msgs = chat['messages']
         idxs, elided = sample_indexes(len(msgs))
 
@@ -274,15 +534,32 @@ def generate_daily_audit(target_str=None):
         f"- Prefira '3 frentes avançaram, 1 ficou pendente' a 'você pulou de contexto'. By the Elders, isso é uma agenda, não um crime de guerra.\n\n"
         f"REGRAS DE EVIDÊNCIA:\n"
         f"- Não invente pendências técnicas. Se logs não provam problema de timezone, SMTP, Docker, path, API ou permissão, não mencione.\n"
-        f"- `next_action` deve vir de pendência real nos logs. Se tudo relevante fechou, use monitorar/validar a próxima execução concreta.\n"
+        f"- `next_action` deve vir de pendência real nos logs. Se tudo relevante fechou, escreva literalmente "
+        f"'Nada pendente; dia fechado.' — NÃO invente vigilância para preencher o campo. "
+        f"E `next_action` NUNCA justifica criar uma `open_thread`: são campos independentes.\n"
         f"- `resolved_threads` é OBRIGATÓRIO sempre que algo fechar, e é o que impede pendência imortal. "
         f"Regra de prova: só entra se o log mostrar CONFIRMAÇÃO DE FUNCIONAMENTO — saída de comando, teste passando, "
         f"serviço respondendo, ou o {USER_NAME} dizendo que funcionou. Intenção ('vou fazer X', 'agora é só rodar') NÃO conta. "
-        f"Escreva a evidência entre parênteses no próprio item. Na dúvida, deixe em `open_threads`: "
-        f"fechar cedo demais some com o problema do radar, que é pior que repetir.\n"
+        f"Escreva a evidência entre parênteses no próprio item.\n"
+        f"- NA DÚVIDA, NÃO ABRA. Uma pendência real reaparece sozinha nos logs de amanhã; uma fantasma "
+        f"não sai nunca mais e enterra as reais. Lista inflada é lista ignorada — ter demais é como ter nada.\n"
         f"- Um item NÃO pode aparecer em `open_threads` e `resolved_threads` ao mesmo tempo. Escolha.\n"
         f"- Ao escrever `open_threads`, releia o HISTÓRICO RECENTE: se uma pendência antiga fechou hoje, "
         f"ela vai para `resolved_threads` nomeada IGUAL à do dia em que nasceu, para o encerramento casar.\n"
+        f"- CRITÉRIO DE NASCIMENTO de `open_threads` (tão rigoroso quanto o de encerramento): só nasce item que "
+        f"tenha (a) AÇÃO CONCRETA que o {USER_NAME} precisa executar, e (b) CONDIÇÃO DE FECHAMENTO verificável, "
+        f"escrita entre colchetes no fim do item — o fato observável que provará que morreu. "
+        f"Ex.: 'Rodar fsck.ext4 -f no sda2 [fecha quando: fsck terminar sem erro]'.\n"
+        f"- ORIGEM OBRIGATÓRIA: todo item de `open_threads` começa com o número do chat de onde veio, "
+        f"ex.: '[#3] Rodar X [fecha quando: Y]'. Chat marcado [SEM PENDÊNCIAS] NUNCA gera `open_threads` "
+        f"(pode entrar em narrativa, workstreams e resolved_threads normalmente).\n"
+        f"- PROIBIDO abrir thread que comece com Monitorar, Acompanhar, Aguardar comportamento, Observar ou "
+        f"Ficar de olho. Vigilância passiva não é pendência: não tem ação nem critério de fim, então nunca fecha. "
+        f"Se algo merece atenção mas não tem ação, isso é `narrative` ou `next_action`, NÃO `open_threads`.\n"
+        f"- Bloqueio externo (esperando terceiro/hardware/resposta) só vira thread se disser DE QUEM se espera "
+        f"e o que fazer se não vier. Sem isso, não abre.\n"
+        f"- LIMITE DURO: no máximo 5 itens em `open_threads`. Se houver mais candidatos, mantenha os 5 de maior "
+        f"impacto operacional e descarte o resto — o descarte é intencional, não esquecimento.\n"
         f"- Em `workstreams[].status`, use APENAS: advanced, maintained, blocked, noise. "
         f"Use advanced para concluído/resolvido com avanço real; maintained para rotina tratada; blocked para dependência externa; noise para falso alarme/loop.\n\n"
         f"FORMATO JSON ESTRITO (responda APENAS JSON puro, sem markdown, sem ```):\n"
@@ -297,7 +574,7 @@ def generate_daily_audit(target_str=None):
         f"  \"ops_brief\": {{\n"
         f"    \"line_of_day\": \"Resumo executivo em 1 frase, sem psicologizar.\",\n"
         f"    \"advances\": [\"Avanço concreto 1\", \"Avanço concreto 2\"],\n"
-        f"    \"open_threads\": [\"Pendência concreta 1\"],\n"
+        f"    \"open_threads\": [\"[#N] Ação concreta pendente [fecha quando: condição verificável]\"],\n"
         f"    \"resolved_threads\": [\"Pendência que MORREU hoje, com a evidência entre parênteses\"],\n"
         f"    \"noise_detected\": [\"Ruído/loop real, se houver\"],\n"
         f"    \"next_action\": \"Uma próxima ação recomendada, específica.\"\n"
@@ -352,6 +629,7 @@ def generate_daily_audit(target_str=None):
 
         raw_json = raw_json.replace("```json", "").replace("```", "").strip()
         new_audit = json.loads(raw_json)
+        new_audit = _filtrar_open_threads(new_audit, chats)
 
         history = []
         if os.path.exists(OUTPUT_FILE):
@@ -371,6 +649,7 @@ def generate_daily_audit(target_str=None):
 
         history.sort(key=lambda x: x.get("date", ""), reverse=True)
         history = history[:30]
+        expire_open_threads(history, today_str)
 
         with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
             json.dump(history, f, indent=2, ensure_ascii=False)
@@ -387,7 +666,8 @@ def call_deepseek_text(prompt_text):
     url = "https://api.deepseek.com/chat/completions"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
     data = {
-        "model": "deepseek-chat",
+        "model": DEEPSEEK_MODEL,
+        "thinking": {"type": "disabled"},
         "messages": [{"role": "user", "content": prompt_text}]
     }
     response = requests.post(url, headers=headers, json=data, timeout=60)
@@ -462,24 +742,20 @@ def generate_user_memory():
         f"injetados separadamente no boot. Portanto, NÃO repita identidade estática, idade, cargo, salário, "
         f"diagnósticos, medicações, regras de interação, nem a dica de ler `infra.md`. Foque apenas em memória "
         f"dinâmica e contexto operacional recente.\n\n"
+        f"PRECEDÊNCIA: as docs canônicas de `ai_config/` (ex.: `infra.md`, `servers.md`) são a FONTE DE "
+        f"VERDADE técnica — escritas com evidência e versionadas. Se algo do histórico divergir delas, "
+        f"**a doc ganha**. Não afirme configuração técnica (IP, porta, versão, threshold, qual modelo está "
+        f"configurado) como fato: cite o que o {USER_NAME} FEZ, não o estado do sistema — o estado está na doc.\n\n"
         f"Abaixo está o histórico de auditoria diária dos últimos dias e um resumo do Prontuário Psicológico "
         f"(MemoryProfile DNA): {profile_text}\n\n"
         f"REGRAS ESTRITAS:\n"
         f"1. LIMITAÇÃO RIGOROSA: o arquivo final NÃO PODE passar de ~700 tokens.\n"
         f"2. FORMATO: Markdown válido, limpo, com estes blocos quando houver conteúdo: "
-        f"'## Últimos 3 dias', '## Padrões persistentes', '## Pendências ativas', '## Prontuário psicológico'.\n"
+        f"'## Últimos 3 dias', '## Padrões persistentes', '## Prontuário psicológico'. NÃO escreva bloco de pendências: ele é montado por código e inserido depois. Também não liste pendências/itens em aberto dentro dos outros blocos (nada de \"BLOQUEIO ATIVO\" ou \"também aberto\"): a lista de código já cobre.\n"
         f"3. FOCO NOS ÚLTIMOS 2-3 DIAS: detalhe técnico e comportamental útil. O que ele estava tentando resolver? "
         f"Onde parou? Quais os erros? O que merece retomada imediata?\n"
         f"4. RESUMO DO RESTO: o restante do mês deve ser bem compacto, apenas tendências e frentes recorrentes.\n"
         f"5. RUÍDO ZERO: ignore completamente `skacoes`, trading automático diário e tarefas rotineiras irrelevantes.\n"
-        f"5b. ENCERRAMENTO CUMULATIVO (regra dura — o bloco '## Pendências ativas' vive ou morre aqui): "
-        f"antes de listar qualquer pendência, varra TODO o histórico e monte o conjunto de tudo que aparece em "
-        f"`ops_brief.resolved_threads` de QUALQUER dia. Uma pendência que apareceu em `open_threads` no dia 3 e em "
-        f"`resolved_threads` no dia 7 está MORTA e não pode ser listada — mesmo que reapareça em `open_threads` de "
-        f"dias entre 3 e 7, porque o encerramento é posterior. Só sobrevive o que nunca foi resolvido, ou o que foi "
-        f"resolvido e REABRIU depois (aparece em `open_threads` com data maior que a do encerramento).\n"
-        f"5c. Se uma pendência sobreviver, escreva-a com a data em que nasceu (ex.: 'aberta em 2026-08-04'). "
-        f"Pendência sem idade é pendência que ninguém audita.\n"
         f"6. NÃO mencionar ferramentas obsoletas, testes abandonados ou referências mortas como Hermes/Hermes Agent, "
         f"`${INTERNAL_HOST}`, Aura ou experimentos removidos, a menos que ainda sejam um problema ativo e pendente "
         f"nos últimos 2 dias.\n"
@@ -505,6 +781,17 @@ def generate_user_memory():
             memory_md = memory_md[:-3]
             
         memory_md = memory_md.strip()
+
+        # Pending items come from build_pendencias_block (deterministic), never from the LLM.
+        import re as _re
+        memory_md = _re.sub(r"(?ms)^## Pend[eê]ncias[^\n]*\n.*?(?=^## |\Z)", "", memory_md).strip()
+        block = build_pendencias_block(history, today_str)
+        if block:
+            anchor = "## Prontuário psicológico"
+            if anchor in memory_md:
+                memory_md = memory_md.replace(anchor, block + "\n\n" + anchor, 1)
+            else:
+                memory_md = memory_md + "\n\n" + block
 
         with open(memory_file, 'w', encoding='utf-8') as f:
             f.write(memory_md)
@@ -542,36 +829,119 @@ def generate_user_core():
     history_text, _days_ok, _days_total = compact_history(history)
     print(f"[Memory] compact history: {_days_ok}/{_days_total} days ({len(history_text)} chars)")
 
-    prompt_text = (
-        f"Você é a mente de CONSOLIDAÇÃO de longo prazo do {USER_NAME}. Mantém um arquivo "
-        f"'user-core.md' que a IA {PERSONA_NAME} lê no boot. Diferente da memória de curto prazo "
-        f"('user-memory.md', janela de 30 dias que decai por tempo), o CORE guarda fatos "
-        f"ESTÁVEIS que persistem por meses e só mudam por CONTRADIÇÃO — nunca por idade.\n\n"
-        f"NÚCLEO ATUAL (preserve; é a memória já consolidada):\n{existing_core}\n\n"
-        f"HISTÓRICO (auditorias, {_days_ok} dias) para minerar:\n{history_text}\n\n"
-        f"REGRAS DE CONSOLIDAÇÃO:\n"
-        f"1. PRESERVAÇÃO: mantenha TODOS os fatos do núcleo atual, A NÃO SER que algo novo os "
-        f"contradiga. NÃO apague por estar velho — só por estar ERRADO ou SUPERADO.\n"
-        f"2. PROMOÇÃO: adicione ao core apenas fatos ESTÁVEIS e RECORRENTES (apareceram em vários "
-        f"dias, ou são decisões/configs/relacionamentos duráveis). Ruído de um dia só NÃO entra.\n"
-        f"3. RECONCILIAÇÃO: se um fato novo contradiz um antigo, ATUALIZE e marque a mudança com "
-        f"data (ex.: 'migrou de X para Y em {today_str}'). Aposente o obsoleto, não acumule os dois.\n"
-        f"4. NÃO duplique o que já vem de `user-profile.md`/`user-context.md` (identidade, idade, "
-        f"saúde, salário, medicação, regras de interação).\n"
-        f"5. NÃO inclua pendências/loops abertos (a memória de curto prazo cuida disso) nem ruído "
-        f"de trading/`skacoes`.\n"
-        f"6. LIMITE: máximo ~500 tokens. É um núcleo enxuto, não um diário.\n"
-        f"7. FORMATO: Markdown limpo. Blocos sugeridos quando houver conteúdo: "
-        f"'## Stack & ferramentas estáveis', '## Decisões duráveis', '## Relacionamentos & clientes', "
-        f"'## Configurações canônicas'.\n"
-        f"8. SAÍDA: responda APENAS com o Markdown final, sem cercas de código, sem introdução."
+    # --- reconciliation with the canonical docs ---------------------------------
+    # The core used to bloat (871% of its limit) by storing TECHNICAL CONFIGURATION
+    # that belongs to the canonical docs in ai_config/. Facts died in the docs and
+    # survived here, because the PRESERVATION rule only yields to a contradiction from
+    # the 30-day window — and the death certificate expires first. Fix: the core no
+    # longer accepts that KIND of fact.
+    canonical_docs = ""
+    try:
+        names = sorted(
+            n for n in os.listdir(ai_config_dir)
+            if n.endswith(".md") and ".bak" not in n
+            and not n.startswith(("user-memory", "user-core"))
+        )
+        if names:
+            canonical_docs = ", ".join(f"`{n}`" for n in names)
+    except Exception as e:
+        print(f"[core] could not list canonical docs: {e}")
+
+    docs_block = (
+        f"DOCS CANONICAS existentes em ai_config/ (fonte de verdade tecnica, "
+        f"versionadas no git, escritas com evidencia):\n{canonical_docs}\n\n"
+        if canonical_docs else ""
     )
+
+    TOKEN_LIMIT = 500
+
+    def _build_prompt(reinforcement=""):
+        return (
+            f"Você é a mente de CONSOLIDAÇÃO de longo prazo do {USER_NAME}. Mantém um arquivo "
+            f"'user-core.md' que a IA {PERSONA_NAME} lê no boot. Diferente da memória de curto prazo "
+            f"('user-memory.md', janela de 30 dias que decai por tempo), o CORE guarda fatos "
+            f"ESTÁVEIS que persistem por meses e só mudam por CONTRADIÇÃO — nunca por idade.\n\n"
+            f"{docs_block}"
+            f"NÚCLEO ATUAL (ponto de partida, NÃO é intocável — ver regra 0):\n{existing_core}\n\n"
+            f"HISTÓRICO (auditorias, {_days_ok} dias) para minerar:\n{history_text}\n\n"
+            f"REGRAS DE CONSOLIDAÇÃO:\n"
+            f"0. FRONTEIRA (a mais importante). O CORE guarda **padrões de trabalho, decisões "
+            f"de rumo, relacionamentos e preferências duráveis do {USER_NAME}**. O CORE **NÃO** guarda "
+            f"configuração técnica: IPs, portas, nomes de container, entity_id, cron, versões, "
+            f"paths, procedimentos, inventário de ferramenta, **qual modelo de IA está "
+            f"configurado para qual atalho, thresholds, estado de treino/versão de modelo, "
+            f"e status de projeto técnico em andamento**. Isso vive nas DOCS CANÔNICAS acima "
+            f"e lá é mantido com evidência. Se o NÚCLEO ATUAL contiver fatos desse tipo, "
+            f"**REMOVA-OS** — não é perda, a informação está na doc. Exemplos do que sai: "
+            f"'X monitora as contas Y e Z', 'workflow N roda às 05:15', 'container tal com limite "
+            f"de RAM', 'modelo X configurado para o atalho Y', 'treino de Z pendente/em andamento', "
+            f"'threshold em 0,9'. Exemplos do que FICA: 'trabalha em paralelismo cirúrgico', "
+            f"'decidiu não usar modelo caro por custo', 'cliente X é alocação, não "
+            f"empregador'. Teste prático: se o fato pode ficar OBSOLETO por alguém mudar uma "
+            f"configuração, ele NÃO é do núcleo — é da doc.\n"
+            f"1. PRESERVAÇÃO (subordinada à regra 0): mantenha os fatos de padrão/decisão/"
+            f"relacionamento do núcleo atual, a não ser que algo novo os contradiga. Não apague "
+            f"por estar velho — só por estar ERRADO, SUPERADO, ou por violar a regra 0.\n"
+            f"2. PROMOÇÃO: adicione apenas padrões RECORRENTES (vários dias) e decisões duráveis. "
+            f"Ruído de um dia não entra. Configuração técnica não entra NUNCA, por mais recorrente "
+            f"que seja.\n"
+            f"3. RECONCILIAÇÃO: fato novo que contradiz um antigo, ATUALIZE e marque com data "
+            f"(ex.: 'migrou de X para Y em {today_str}'). Aposente o obsoleto, não acumule os dois. "
+            f"**Se o núcleo divergir de uma doc canônica, a DOC GANHA** — ela é escrita com "
+            f"evidência, o núcleo é destilado de conversa.\n"
+            f"4. NÃO duplique o que já vem de `user-profile.md`/`user-context.md` (identidade, idade, "
+            f"saúde, salário, medicação, regras de interação) NEM o conteúdo das docs canônicas.\n"
+            f"5. NÃO inclua pendências/loops abertos (a memória de curto prazo cuida disso) nem ruído "
+            f"de trading/`skacoes`.\n"
+            f"6. LIMITE: máximo ~{TOKEN_LIMIT} tokens (~{TOKEN_LIMIT*4} caracteres). É um núcleo "
+            f"enxuto, não um diário. Este limite é VERIFICADO por código depois — estourar causa "
+            f"retrabalho.\n"
+            f"7. FORMATO: Markdown limpo. Blocos sugeridos quando houver conteúdo: "
+            f"'## Padrões de trabalho', '## Decisões duráveis', '## Relacionamentos & clientes'.\n"
+            f"8. SAÍDA: responda APENAS com o Markdown final, sem cercas de código, sem introdução."
+            f"{reinforcement}"
+        )
+
+    prompt_text = _build_prompt()
 
     print("Consolidating long-term memory (core) via DeepSeek...")
     core_md = call_deepseek_text(prompt_text)
     if not core_md:
         print("DeepSeek returned nothing for core. Trying Gemini...")
         core_md = call_gemini(prompt_text)
+
+    # Enforce the limit (rule 6): "~500 tokens" used to be a polite request the model
+    # ignored for months — the core had grown to 871% of the limit.
+    def _clean(md):
+        if not md:
+            return md
+        md = md.strip()
+        if md.startswith("```markdown"):
+            md = md[11:]
+        elif md.startswith("```"):
+            md = md[3:]
+        if md.endswith("```"):
+            md = md[:-3]
+        return md.strip()
+
+    core_md = _clean(core_md)
+    if core_md:
+        _tok = len(core_md) // 4
+        if _tok > TOKEN_LIMIT * 1.4:
+            print(f"[core] {_tok} tokens (limit {TOKEN_LIMIT}) -- asking the model to cut")
+            reinforcement = (
+                f"\n\nATENÇÃO: sua resposta anterior teve ~{_tok} tokens, muito acima do limite "
+                f"de {TOKEN_LIMIT}. Refaça CORTANDO: aplique a regra 0 com rigor (toda "
+                f"configuração técnica sai) e mantenha só o que é padrão, decisão ou "
+                f"relacionamento durável."
+            )
+            _retry = call_deepseek_text(_build_prompt(reinforcement)) or call_gemini(_build_prompt(reinforcement))
+            _retry = _clean(_retry)
+            if _retry and len(_retry) // 4 < _tok:
+                print(f"[core] retry accepted: {_tok} -> {len(_retry)//4} tokens")
+                core_md = _retry
+            else:
+                print("[core] retry did not improve; keeping the first answer")
 
     if core_md:
         if core_md.startswith("```markdown"):

@@ -19,6 +19,8 @@ SKILL_LOG_PATH = os.path.join(DATA_DIR, "skill_log.jsonl")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
+# Thinking (reasoning) mode is disabled on every call: structured extraction gains nothing from it.
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
 
 # Legacy: keyword matching over the whole blob kept hitting the skill registry (94 false
 # positives for "skpsi"). Ground truth is now skill_log (REAL activations). Kept for reference only.
@@ -165,7 +167,8 @@ def call_deepseek(prompt_text):
     url = "https://api.deepseek.com/chat/completions"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
     data = {
-        "model": "deepseek-chat",
+        "model": DEEPSEEK_MODEL,
+        "thinking": {"type": "disabled"},
         "messages": [{"role": "user", "content": prompt_text}],
         "response_format": {"type": "json_object"}
     }
@@ -182,13 +185,17 @@ def call_gemini(prompt_text):
     return r.json()["candidates"][0]["content"]["parts"][0]["text"]
 
 def distill_memory():
+    """Return a STATUS string: "no-new-session" | "api-error" | "updated (...)".
+    It used to return None on every path and the caller in cockpit.py printed
+    "Profile updated." unconditionally — reporting success even on days when nothing
+    was done. An optimistic log hides real failures."""
     existing_dna = load_existing_dna()
     since_dt = get_last_updated(existing_dna)
 
     chats = get_new_psi_chats(since_dt)
     if not chats:
         print(f"[MemoryProfile] No new sessions since {since_dt}. Profile unchanged.")
-        return
+        return "no-new-session"
 
     print(f"[MemoryProfile] {len(chats)} new session(s) to process.")
     prompt = build_prompt(chats, existing_dna)
@@ -203,11 +210,11 @@ def distill_memory():
             raw_json = call_gemini(prompt)
         except Exception as e2:
             print(f"[MemoryProfile] Gemini failed: {e2}. Profile unchanged.")
-            return
+            return "api-error"
 
     if not raw_json:
         print("[MemoryProfile] No response from the APIs. Profile unchanged.")
-        return
+        return "api-error"
 
     raw_json = raw_json.replace("```json", "").replace("```", "").strip()
     delta = json.loads(raw_json)
@@ -253,6 +260,7 @@ def distill_memory():
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(existing_dna, f, indent=2, ensure_ascii=False)
     print(f"[MemoryProfile] Profile updated (incremental merge). Bugs: {len(current_bugs)}, HW: {len(current_hw)}.")
+    return f"updated ({len(chats)} session(s), bugs={len(current_bugs)}, hw={len(current_hw)})"
 
 if __name__ == "__main__":
     distill_memory()

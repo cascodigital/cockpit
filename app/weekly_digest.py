@@ -16,6 +16,8 @@ OUTPUT_FILE = os.path.join(DATA_DIR, "weekly_digest.json")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
+# Thinking (reasoning) mode is disabled on every call.
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
 
 
 def call_deepseek(prompt_text):
@@ -24,7 +26,8 @@ def call_deepseek(prompt_text):
     url = "https://api.deepseek.com/chat/completions"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
     data = {
-        "model": "deepseek-chat",
+        "model": DEEPSEEK_MODEL,
+        "thinking": {"type": "disabled"},
         "messages": [{"role": "user", "content": prompt_text}],
         "response_format": {"type": "json_object"},
     }

@@ -43,6 +43,7 @@ FILES = {
     "daily_auditor.py": "app/daily_auditor.py",
     "ludovico_distiller.py": "app/memory_distiller.py",
     "weekly_distiller.py": "app/weekly_digest.py",
+    "pendencias.py": "app/pendencias.py",
 }
 
 # Order matters: longest entries first, otherwise "André" eats "do André"

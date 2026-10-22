@@ -950,8 +950,10 @@ def index_worker():
             try:
                 import importlib
                 importlib.reload(memory_distiller)
-                memory_distiller.distill_memory()
-                print(f'[{now}] [MemoryProfile] Profile updated.')
+                # The distiller returns a status; printing "Profile updated." unconditionally
+                # used to report success even on days it had just logged "unchanged".
+                _st = memory_distiller.distill_memory()
+                print(f'[{now}] [MemoryProfile] {_st or "no status (old distiller version)"}')
             except Exception as e:
                 print(f'[{now}] [MemoryProfile] Error: {e}')
             # [Daily Audit] moved to an external scheduler (03:05: docker exec cockpit

@@ -18,6 +18,7 @@ All runtime knobs are environment variables. The full set:
 | `BRAIN_DATA` | `/app/data/brain` | Optional distilled-notes vault (see Journal below) |
 | `INDEX_INTERVAL` | `150` | Seconds between filesystem index scans |
 | `DEEPSEEK_API_KEY` | — | Primary LLM for audits/digests. Cheap, JSON-mode reliable |
+| `DEEPSEEK_MODEL` | `deepseek-flash` | DeepSeek model for audits, memory files, weekly digest and memory profile; thinking mode is always sent as disabled |
 | `GEMINI_API_KEY` | — | Fallback LLM, AND the embeddings provider for semantic search |
 | `OPENAI_API_KEY` | — | Optional. Enables LLM reranking + `/api/ask` |
 | `RERANK_MODEL` | `gpt-4o-mini` | Model used for reranking |
@@ -28,6 +29,7 @@ All runtime knobs are environment variables. The full set:
 | `USER_NAME` | `the user` | Name interpolated into the audit/memory prompts |
 | `PERSONA_NAME` | `the auditor` | Persona name interpolated into the audit/memory prompts |
 | `DATA_DIR` | `/app/data` | Data root for the auditor/distiller scripts (the server itself uses `/app/data`) |
+| `NO_PENDING_SKILLS` | `""` (empty) | Comma-separated skill slugs whose sessions never create pending items (see [MEMORY-PIPELINE.md](MEMORY-PIPELINE.md#how-a-pending-item-dies)) |
 
 Everything degrades independently: with no keys at all you keep indexing, BM25
 search, the journal panel and the whole UI. `GEMINI_API_KEY` adds embeddings;

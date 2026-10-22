@@ -21,7 +21,8 @@ session's system prompt.
 - Searches with chunk-level BM25 (accent-insensitive), optional Gemini embeddings, Reciprocal Rank Fusion and optional LLM reranking.
 - Answers natural-language questions from a distilled notes journal with cited dates (`POST /api/ask`, "Ask the Panopticon").
 - Generates a daily "Ops Brief" as structured JSON: headline, narrative, workstreams, open/resolved threads, focus score, per-chat categories.
-- Maintains two memory layers for prompt injection: a 30-day rolling `user-memory.md` and a long-term `user-core.md` that changes only by contradiction.
+- Maintains two memory layers for prompt injection: a 30-day rolling `user-memory.md` and a long-term `user-core.md` that changes only by contradiction, with its size limit enforced by code.
+- Builds the active pending-items list deterministically (similarity grouping, close matching, 14-day TTL) and lets the user kill items from a CLI (`app/pendencias.py`).
 - Builds a weekly digest across the last 7 daily audits on demand.
 - Renders a category heatmap over the stored audit days (up to 30), per-source badges (Claude/Gemini/Codex/web) and per-host badges (WIN/LNX/DKR/WEB).
 - Ships a seed script with fictional data for demos and evaluation.
@@ -51,8 +52,10 @@ session's system prompt.
   clients.
 - `app/daily_auditor.py` is run once a day by an external scheduler (cron, n8n, etc.). Day
   membership is decided by message timestamps, not file mtime, and each chat is sampled
-  head + middle + tail under a per-chat character budget. DeepSeek is the primary LLM, Gemini the
-  fallback.
+  head + middle + tail under a per-chat character budget. DeepSeek (`DEEPSEEK_MODEL`, thinking
+  disabled) is the primary LLM, Gemini the fallback. The LLM proposes open/resolved threads;
+  the `## Pendências ativas` block of `user-memory.md` is then computed in Python
+  (`build_pendencias_block()`), because prompt rules alone kept closed items alive.
 - `app/memory_distiller.py` runs from the index worker at 23:45 local time and only processes
   sessions tagged with `MEMORY_SKILL` via `POST /api/skill_log`.
 - `scripts/promote.py` regenerates `app/` from a private production copy, sanitizing names and
@@ -112,12 +115,14 @@ Server variables (set in `.env`, passed through `docker-compose.yml`). Full refe
 | `CHATGPT_SITE_DATA`, `GEMINI_SITE_DATA`, `CLAUDE_SITE_DATA` | no | `/app/data/<source>_site` | Optional web-capture directories (`machine=WEB`) |
 | `BRAIN_DATA` | no | `/app/data/brain` | Optional notes vault with `journal/YYYY-MM-DD.md` files |
 | `DEEPSEEK_API_KEY` | no | empty | Primary LLM for daily audits, memory files, weekly digest, memory profile |
+| `DEEPSEEK_MODEL` | no | `deepseek-flash` | DeepSeek model for every LLM call above; thinking mode is sent as disabled |
 | `GEMINI_API_KEY` | no | empty | LLM fallback and embeddings provider for semantic search |
 | `OPENAI_API_KEY` | no | empty | Enables LLM reranking and `/api/ask` |
 | `RERANK_MODEL` / `RERANK_TOP` | no | `gpt-4o-mini` / `30` | Reranking model and number of candidates reranked |
 | `ASK_MODEL` | no | `gpt-4o-mini` | Model answering `/api/ask` |
 | `ASK_CHAR_BUDGET` / `ASK_RECENT_DAYS` | no | `90000` / `5` | Journal context cap and newest days always included |
 | `MEMORY_SKILL` | no | empty | Skill slug whose sessions feed the memory profile; empty disables it |
+| `NO_PENDING_SKILLS` | no | empty | Comma-separated skill slugs whose sessions never create pending items |
 | `USER_NAME` / `PERSONA_NAME` | no | `the user` / `the auditor` | Names interpolated into the audit and memory prompts |
 
 Client sync variables (`scripts/sync/.env`): `COCKPIT_HOST`, `COCKPIT_USER`,
@@ -143,6 +148,14 @@ Run the daily audit (defaults to yesterday; pass a date to catch up):
 
 ```bash
 docker exec cockpit python /app/daily_auditor.py 2026-08-04
+```
+
+List the active pending items injected into memory, and kill the ones that are done
+(`mata` = "kill"; the item and its rewordings stay out of future runs):
+
+```bash
+docker exec cockpit python /app/pendencias.py
+docker exec cockpit python /app/pendencias.py mata 2 5
 ```
 
 HTTP API:
@@ -171,6 +184,9 @@ HTTP API:
   produced in Portuguese. Prompt tone is an opinionated, sarcastic persona; edit the
   `prompt_text` blocks to change it (keep the JSON shape, the UI parses it).
 - The daily audit converts timestamps with a fixed UTC-3 offset (`BRT` in `daily_auditor.py`).
+- Pending-item matching relies on Portuguese markers produced by the prompt (`[fecha quando: ...]`,
+  passive verbs such as `Monitorar`) and recognizes ticket IDs only with the prefixes `SUP`, `IT`,
+  `INC` and `RITM`.
 - Rerank and `/api/ask` call `https://api.openai.com/v1` directly; the endpoint is not
   configurable, so local OpenAI-compatible servers are not supported in the current code.
 - The Codex parser is best-effort; the Codex JSONL format has changed before.
